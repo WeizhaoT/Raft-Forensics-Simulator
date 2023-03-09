@@ -55,3 +55,17 @@ class ModuloDelay(BaseDelay):
         super().__call__(n1, n2)
         n1, n2 = (n1-self.base) % self.n, (n2-self.base) % self.n
         return (abs(n2 - n1) % self.n) * self.step + self.start
+
+
+class ModuloRandomDelay(BaseDelay):
+    def __init__(self, n: int, start: int, step: int, rand_mult: float) -> None:
+        super().__init__(n)
+        self.start = start
+        self.step = step
+        self.mult = max(1., rand_mult)
+
+    def __call__(self, n1: int, n2: int) -> int:
+        super().__call__(n1, n2)
+        n1, n2 = (n1-self.base) % self.n, (n2-self.base) % self.n
+        dist = (abs(n2 - n1) % self.n) * self.step + self.start
+        return np.random.randint(dist, int(dist * self.mult) + 1)

@@ -2,13 +2,14 @@ import numpy as np
 import argparse
 
 from network import Network
-from delays import BaseDelay, ConstantDelay, UniformDelay, ModuloDelay
+from delays import BaseDelay, ConstantDelay, UniformDelay, ModuloDelay, ModuloRandomDelay
 
 
 def main(period, maxtime):
-    n = 3
+    n = 5
     # net = Network(n, ConstantDelay(n, 100), 500)
-    net = Network(n, ModuloDelay(n, 0, step=50), tx_retry=500)
+    # net = Network(n, ModuloDelay(n, 0, step=100), tx_retry=500)
+    net = Network(n, ModuloRandomDelay(n, 0, step=100, rand_mult=2.0), tx_retry=500)
     net.run(period, maxtime, tx_interval=50, tx_count=100, sleep=.1)
 
 

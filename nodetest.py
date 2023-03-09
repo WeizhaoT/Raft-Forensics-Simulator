@@ -23,6 +23,11 @@ if __name__ == '__main__':
     for b in node.blocks:
         print(b)
 
+    print(node.has(Block(1, 3, 1)))
+    print(node.has(Block(1, 3, 1, '1')))
+    print(node.has(Block(1, 5, 2)))
+    print(node.has(Block(1, 5, 1)))
+
     # chain3 = [Block(3, 8, 2)] + [Block(3, i, 3) for i in range(9, 10)]
     # print('append 3: ', node.handle_append_entries(chain3))
     # for b in node.blocks:

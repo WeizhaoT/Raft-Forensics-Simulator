@@ -2,3 +2,5 @@ logs
 *.log
 __pycache__
 .vscode
+*.txt
+test.py
