@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from colorama import Fore
+
 import matplotlib
 import numpy as np
 import heapq
@@ -48,36 +50,82 @@ class Network:
 
         return self.delay_mgr(node1, node2)
 
-    def commit(self, evt: Event):
+    def commit(self, evt: Event, adversarial=False):
+        if adversarial:
+            leader, progress, prog_commit = self.adversary, self.adversarial_progress, self.adversarial_commit
+        else:
+            leader, progress, prog_commit = self.leader, self.progress, self.progress_commit
+
         res = []
-        ranks = sorted(self.progress, key=self.progress.get, reverse=True)
-        current_push = self.progress[ranks[self.quorum - 1]]
+        ranks = sorted(progress, key=progress.get, reverse=True)
+        current_push = progress[ranks[self.quorum - 1]]
         cc = ranks[:self.quorum]
 
-        # print(current_push, self.progress)
+        if current_push > prog_commit:
+            if adversarial:
+                self.adversarial_commit = current_push
+            else:
+                self.progress_commit = current_push
 
-        if current_push > self.progress_commit:
-            self.progress_commit = current_push
-            self.leader.commit(*current_push, cc)
-            res = [Event(node, Etype.CMT, evt.t + self.delay(self.leader, node), *current_push, cc)
+            leader.commit(*current_push, cc)
+            res = [Event(node, Etype.CMT, evt.t + self.delay(leader, node), *current_push, cc)
                    for node in self.leader.listeners]
+        elif current_push == prog_commit:
+            follower, _, _ = evt.args
+            res = [Event(follower, Etype.CMT, evt.t + self.delay(leader, follower), *current_push, cc)]
 
-        if not self.leader_fork:
-            return res
-
-        # TODO:
+        return res
 
     def split_honest(self):
-        assert self.leader.id == self.aid
+        ns = sorted([n for n in self.nodes if n.id != self.aid], key=lambda n: n.head.h)
 
-        for node in self.nodes:
-            if not self.leader.has(node.head):
-                self.leader.remove_listener(node)
-                if self.leader_fork:
-                    self.adversary.add_listeners([node])
-                    # TODO:
+        leaf = set([ns[0]])
+        prefixes = {}
+        for i, n in enumerate(ns[1:]):
+            leaf.add(n)
+            for j in range(i, -1, -1):
+                if n.has(ns[j].head):
+                    prefixes[n.id] = ns[j]
+                    leaf.discard(ns[j])
+                    break
 
-        self.progress
+        leaf = list(leaf)
+        if len(leaf) > 2:
+            raise ValueError('3 branches detected. Cannot split consensus in halves')
+
+        v1, s1 = leaf[0], [leaf[0]]
+        while len(s1) < self.quorum - 1 and v1.id in prefixes:
+            v1 = prefixes[v1.id]
+            s1.append(v1)
+
+        if len(s1) < self.quorum - 1:
+            raise ValueError('a branch does not have (n-1)/2 nodes')
+
+        s1_set = set(s1)
+        s2 = [n for n in ns[::-1] if n not in s1_set]
+        if len(leaf) == 2:
+            v2, s2p = leaf[1], [leaf[1]]
+            while len(s2p) < self.quorum - 1 and v2.id in prefixes:
+                v2 = prefixes[v2.id]
+                if v2 not in s1_set:
+                    s2p.append(v2)
+
+            if len(s2p) < self.quorum - 1:
+                raise ValueError('a branch does not have (n-1)/2 nodes')
+
+        del s1_set
+
+        leader = self.nodes[self.aid]
+
+        leader.steal_from(s1[0])
+        leader.clear_listeners()
+        leader.add_listeners(s1)
+
+        self.adversary.steal_from(s2[0])
+        self.adversary.clear_listeners()
+        self.adversary.add_listeners(s2)
+
+        return s1, s2
 
     def make_lc(self, lid):
         lc, acc, candidate = [lid], [], self.nodes[lid]
@@ -98,22 +146,37 @@ class Network:
         if evt.subject is None:
             evt.subject = self.dummy
 
-        if evt.type == Etype.LEAD:
+        if evt.type == Etype.AUTOLEAD:
+            if self.leader_fork and self.leader.id == self.aid:
+                nrank = sorted(self.leader.peers, key=lambda node: node.freshness, reverse=True)
+                new_leader = nrank[1].id if nrank[1] != self.aid else nrank[0].id
+                self.leader.steal_from(self.nodes[new_leader])
+            else:
+                nrank = sorted(self.leader.peers, key=lambda node: node.freshness)
+                new_leader = nrank[self.quorum - 1].id
+
+            # return self.handle_new_leader(Event(None, Etype.LEAD, evt.t, new_leader))
+            return [Event(None, Etype.LEAD, evt.t, new_leader)]
+        elif evt.type == Etype.LEAD:
             return self.handle_new_leader(evt)
         elif evt.type == Etype.TX:
             tx, rem = evt.args
             if self.leader.id >= 0:
-                block = self.leader.accept_tx(tx)
-                self.progress[self.leader.id] = (block.t, block.h)
                 # ADVERSARIAL: FORK AS LEADER
                 if self.aid == self.leader.id and self.leader_fork:
-                    ablock = self.adversary.accept_tx(tx)
-                    self.adversarial_progress[self.aid] = (ablock.t, ablock.h)
-                    return [Event(node, Etype.REP, evt.t + self.delay(self.leader, node), self.leader, [block])
-                            for node in self.leader.listeners] + \
-                        [Event(node, Etype.REP, evt.t + self.delay(self.leader, node), self.adversary, [ablock])
-                         for node in self.adversary.listeners]
+                    if (self.leader.tail.h + self.adversary.tail.h) % 2 == 0:
+                        block = self.leader.accept_tx(tx)
+                        self.progress[self.leader.id] = (block.t, block.h)
+                        return [Event(node, Etype.REP, evt.t + self.delay(self.leader, node), self.leader, [block])
+                                for node in self.leader.listeners]
+                    else:
+                        ablock = self.adversary.accept_tx(tx)
+                        self.adversarial_progress[self.aid] = (ablock.t, ablock.h)
+                        return [Event(node, Etype.REP, evt.t + self.delay(self.leader, node), self.adversary, [ablock])
+                                for node in self.adversary.listeners]
                 else:
+                    block = self.leader.accept_tx(tx)
+                    self.progress[self.leader.id] = (block.t, block.h)
                     return [Event(node, Etype.REP, evt.t + self.delay(self.leader, node), self.leader, [block])
                             for node in self.leader.listeners]
             else:
@@ -130,9 +193,6 @@ class Network:
                 return [Event(leader, Etype.ACK, evt.t + self.delay(evt.subject, leader), evt.subject, blocks[-1].t, blocks[-1].h)]
             elif res == Rtype.KEEP:
                 return [Event(leader, Etype.R2, evt.t + self.delay(evt.subject, leader), evt.subject, evt.subject.head.h)]
-            # elif res == Rtype.REJ and self.leader.id == self.aid:
-            #     leader.listeners.remove(evt.subject)
-            #     # TODO:
             else:
                 return []
         elif evt.type == Etype.ACK:
@@ -142,10 +202,15 @@ class Network:
             follower, t, h, = evt.args
             fid = follower.id
             if evt.subject.adversarial:
-                self.adversarial_progress[fid] = max(self.adversarial_progress[fid], (t, h))
+                if self.adversarial_progress[fid] < (t, h):
+                    self.adversarial_progress[fid] = (t, h)
+                    return self.commit(evt, adversarial=True)
             else:
-                self.progress[fid] = max(self.progress[fid], (t, h))
-            return self.commit(evt)
+                if self.progress[fid] < (t, h):
+                    self.progress[fid] = (t, h)
+                    return self.commit(evt, adversarial=False)
+
+            return []
         elif evt.type == Etype.R2:
             if evt.subject != self.leader:
                 return []
@@ -154,8 +219,6 @@ class Network:
         elif evt.type == Etype.CMT:
             t, h, cc = evt.args
             res = evt.subject.commit(t, h, cc)
-            # if not res:
-            #     print(evt.subject.id, evt.subject.head, evt.subject.tail, t, h, cc)
             return []
 
     def run(self, period, maxtime, tx_interval, tx_count, max_tx_retry=20, sleep=0, debug=True):
@@ -196,8 +259,12 @@ class Network:
                     if debug:
                         ef.flush()
 
-                    bar.set_description(f'[{t} ms @ {self.progress_commit[1]}] ' +
-                                        ' '.join(f'{v.tail.h}/{v.head.h}' for p, v in zip(self.progress, self.nodes)))
+                    def brief(node: Node):
+                        p = f'{node.tail.h}/{node.head.h}'
+                        return Fore.YELLOW + p + Fore.RESET if node == self.leader else p
+
+                    bar.set_description(f'{Fore.LIGHTBLUE_EX}[{t} ms @ {self.progress_commit[1]}]{Fore.RESET} ' +
+                                        ' '.join(brief(v) for v in self.nodes))
                     bar.update()
 
                     if t + period >= maxtime:
@@ -225,36 +292,39 @@ class Network:
             return []
 
         lc, acc = [], []
-        if self.leader_fork:
-            lid = self.aid
+        term = max(n.term for n in self.nodes) + 1
+        if self.leader_fork and lid == self.aid:
+            s1, s2 = self.split_honest()
+            self.leader = self.nodes[lid]
+            prep = [(self.leader, s1, term, s1, self.progress),
+                    (self.adversary, s2, term+1, s2, self.adversarial_progress)]
         else:
             lc, acc = self.make_lc(lid)
             if len(lc) < self.quorum:
                 return []
 
-        self.delay_mgr.rebase(lid)
+            self.leader = self.nodes[lid]
+            prep = [(self.leader, acc, term, lc, self.progress)]
 
-        self.leader = self.nodes[lid]
-        self.leader.clear_listeners()
-        self.leader.add_listeners(acc)
-        term = self.leader.increment_term()
-
-        ft, fh = self.leader.tail.t, self.leader.tail.h
-        self.leader.accept_leader(term, ft, fh, lid, lc)
-
-        for node in acc:
-            node.accept_leader(term, ft, fh, lid, lc)
-
-        self.progress = {i: (0, 0) for i in range(self.n)}
-        self.progress[lid] = ft, fh
-
-        for node in self.nodes:
-            if node.id == lid:
-                continue
-
-            node.update_term(term)
-
-        if self.leader_fork:
-            self.split_honest()
+        for args in prep:
+            self.prepare_for_new_leader(*args)
 
         return []
+
+    def prepare_for_new_leader(self, leader: Node, followers: List[Node], term: int, lc: List[Node], progress):
+        leader.clear_listeners()
+        leader.add_listeners(followers)
+        leader.update_term(term)
+
+        ft, fh = leader.freshness
+        leader.accept_leader(term, ft, fh, leader.id, lc)
+
+        for node in followers:
+            node.accept_leader(term, ft, fh, leader.id, lc)
+
+        progress.clear()
+        progress.update({f.id: (0, 0) for f in followers})
+        progress[leader.id] = ft, fh
+
+        for node in followers:
+            node.update_term(term)

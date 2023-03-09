@@ -1,9 +1,11 @@
 from __future__ import annotations
 import json
 import os
+import shutil
 import numpy as np
 from os.path import join
 from typing import List
+from copy import deepcopy
 from enum import Enum
 from file_read_backwards import FileReadBackwards
 
@@ -62,14 +64,11 @@ class Node:
     def __init__(self, id_, n, adversarial=False) -> None:
         self.id = id_
         self.n = n
-        self.neg_sessid = -1
         self.adversarial = adversarial
 
         self.term = 0
 
-        self.height = 0
         self.blocks = [Block(0, 0, -1, '')]
-        self.pending_blocks = {}
 
         self.cc = []
         self.lc = {}
@@ -93,6 +92,14 @@ class Node:
     @property
     def tail(self):
         return self.blocks[-1]
+
+    @property
+    def freshness(self):
+        return self.blocks[-1].t, self.blocks[-1].h
+
+    @property
+    def peers(self):
+        return [self] + list(self.listeners)
 
     def filename(self, prefix):
         return f'{prefix}_{self.id}a.jsonl' if self.adversarial else f'{prefix}_{self.id}.jsonl'
@@ -264,6 +271,29 @@ class Node:
         self.chain_f.flush()
         self.blocks = self.blocks[i:]
         return True
+
+    def steal_from(self, node: Node):
+        self.blocks = deepcopy(node.blocks)
+        self.cc = deepcopy(node.cc)
+        self.lc = deepcopy(node.lc)
+
+        self.chain_f.close()
+        self.leader_f.close()
+
+        PREFIXES = ['blockchain', 'commitment', 'leader']
+        for file in os.listdir(DIR):
+            if any(file.startswith(f'{p}_{self.id}') for p in PREFIXES):
+                os.remove(join(DIR, file))
+
+        for file in os.listdir(DIR):
+            for p in PREFIXES:
+                fullpf = f'{p}_{node.id}'
+                if file.startswith(fullpf):
+                    postfix = file[len(fullpf):]
+                    shutil.copyfile(join(DIR, file), join(DIR, f'{p}_{self.id}{postfix}'))
+
+        self.chain_f = open(join(DIR, self.filename('blockchain')), 'a')
+        self.leader_f = open(join(DIR, self.filename('leader')), 'a')
 
     def flush_uncommitted(self):
         with open(join(DIR, self.filename('uncommitted')), 'w') as f:
