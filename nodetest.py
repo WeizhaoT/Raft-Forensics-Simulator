@@ -1,8 +1,8 @@
-from node import Block, Node
+from node import Block, node.Node
 
 
 if __name__ == '__main__':
-    node = Node(1, 5)
+    node = node.Node(1, 5)
     chain1 = [Block(1, i, 0 if i == 1 else 1) for i in range(1, 11)]
     print(node.handle_append_entries(chain1))
     print(node.commit(2, 5))

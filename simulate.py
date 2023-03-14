@@ -1,16 +1,16 @@
 import numpy as np
 import argparse
 
+from event import TestEvents
 from network import Network
 from delays import BaseDelay, ConstantDelay, UniformDelay, ModuloDelay, ModuloRandomDelay
 
 
 def main(period, maxtime):
     n = 5
-    # net = Network(n, ConstantDelay(n, 100), 500)
-    # net = Network(n, ModuloDelay(n, 0, step=100), tx_retry=500)
-    net = Network(n, ModuloRandomDelay(n, 0, step=100, rand_mult=2.0), tx_retry=500, adversary=1)
-    net.run(period, maxtime, tx_interval=50, tx_count=100, sleep=.1)
+    net = Network(n, ModuloRandomDelay(n, 0, step=100, rand_mult=2.0), tx_retry_time=500, adversary=1)
+    events = TestEvents.TEST_BAD_VOTE_1(tx_count=100, tx_interval=50, tx_retry=20)
+    net.run(period, maxtime, events, sleep=.1)
 
 
 if __name__ == '__main__':
