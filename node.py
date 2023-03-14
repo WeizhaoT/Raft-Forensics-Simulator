@@ -1,16 +1,28 @@
 from __future__ import annotations
 import json
 import os
+import io
 import shutil
 import numpy as np
 from os.path import join
-from typing import List
+from typing import List, Dict
 from copy import deepcopy
 from enum import Enum
 from file_read_backwards import FileReadBackwards
 
 
 DIR = 'logs'
+
+
+def readline_non_empty(f: io.TextIOWrapper) -> str:
+    for _ in range(10000):
+        line: str = f.readline()
+        if len(line) == 0:
+            raise EOFError()
+        if not line.isspace():
+            return line
+
+    raise NotImplementedError('readline_non_empty encountered too many empty lines')
 
 
 class Rtype(Enum):
@@ -59,27 +71,56 @@ class Block:
     def follows(self, block):
         return self.pt == block.t
 
+    @staticmethod
+    def strlist(blocks: List[Block]):
+        if len(blocks) == 0:
+            return '[]'
+
+        block_strs, term, last_h = [], -1, -1
+        for j, block in enumerate(blocks + [Block(blocks[-1].t+1, blocks[-1].h+1, 0)]):
+            if term < block.t:
+                # block_strs.append(f'"{term}, {j}, {block}"')
+                if j > 0:
+                    if block.h == last_h + 2:
+                        block_strs.append(f'"{str(blocks[j-1])}"')
+                    elif block.h >= last_h + 3:
+                        block_strs.extend(['"..."', f'"{str(blocks[j-1])}"'])
+
+                if j < len(blocks):
+                    term = block.t
+                    last_h = block.h
+                    block_strs.append(f'"{str(block)}"')
+
+        return '[' + ', '.join(block_strs) + ']'
+
 
 class Node:
     def __init__(self, id_, n, adversarial=False) -> None:
-        self.id = id_
-        self.n = n
-        self.adversarial = adversarial
+        self.id: int = id_
+        self.n: int = n
+        self.adversarial: bool = adversarial
 
-        self.term = 0
+        self.term: int = 0
 
-        self.blocks = [Block(0, 0, -1, '')]
+        self.blocks: List[Block] = [Block(0, 0, -1, '')]
 
-        self.cc = []
-        self.lc = {}
+        self.cc: List[int] = []
+        self.lc: Dict[int, int] = {}
 
         self.listeners: set(Node) = set([])
 
-        if id_ >= 0:
-            self.chain_f = open(join(DIR, self.filename('blockchain')), 'w')
-            self.chain_f.write(f'{self.blocks[0].to_json()}\n')
+        self.asked = -1
+        self.acked = -1
 
-            self.leader_f = open(join(DIR, self.filename('leader')), 'w')
+        if id_ >= 0:
+            self.log_f: io.TextIOWrapper = open(join(DIR, self.filename('log')), 'w')
+            self.chain_f: io.TextIOWrapper = open(join(DIR, self.filename('blockchain')), 'w')
+            self.leader_f: io.TextIOWrapper = open(join(DIR, self.filename('leader')), 'w')
+
+            self.chain_f.write(f'{self.blocks[0].to_json()}\n')
+        else:
+            self.chain_f = None
+            self.leader_f = None
 
     @property
     def quorum(self):
@@ -101,8 +142,16 @@ class Node:
     def peers(self):
         return [self] + list(self.listeners)
 
+    @property
+    def name(self):
+        return f'a{self.id}' if self.adversarial else f'{self.id}'
+
     def filename(self, prefix):
-        return f'{prefix}_{self.id}a.jsonl' if self.adversarial else f'{prefix}_{self.id}.jsonl'
+        return f'{prefix}_{self.name}.jsonl'
+
+    def write_log(self, t, log):
+        self.log_f.write(f'[ {t:6d} ms ] {str(log)}\n')
+        self.log_f.flush()
 
     def validate_cc(self, block: Block, cc: List[int]) -> bool:
         return True
@@ -112,6 +161,20 @@ class Node:
 
     def __lt__(self, node: Node):
         return self.id < node.id
+
+    def set_asked(self) -> bool:
+        ret = self.asked < self.head.h
+        self.asked = self.head.h
+        return ret
+
+    def set_acked(self) -> bool:
+        ret = self.acked < self.tail.h
+        self.acked = self.tail.h
+        return ret
+
+    def reset_leader_prog(self):
+        self.asked = -1
+        self.acked = -1
 
     def clear_listeners(self):
         self.listeners = set([])
@@ -184,17 +247,17 @@ class Node:
             return self.blocks[h_start-self.head.h:]
 
         files = [join(DIR, f) for f in os.listdir(DIR) if os.path.isfile(
-            join(DIR, f)) and f.startswith(f'blockchain_{self.id}') and f.endswith('.jsonl')]
+            join(DIR, f)) and f.startswith(f'blockchain_{self.name}') and f.endswith('.jsonl')]
 
         files = sorted(files)
         blocks = {}
         for filename in files:
             with open(filename, 'r') as f:
                 for line in f.readlines():
-                    block = Block.fromjson(line)
-
-                    if block.h > h_start:
-                        blocks[block.h] = block
+                    if not line.isspace():
+                        block = Block.fromjson(line)
+                        if block.h > h_start:
+                            blocks[block.h] = block
 
         i, block_list = h_start+1, []
         while i in blocks:
@@ -222,36 +285,42 @@ class Node:
             return False
 
         files = [join(DIR, f) for f in os.listdir(DIR) if os.path.isfile(
-            join(DIR, f)) and f.startswith(f'blockchain_{self.id}') and f.endswith('.jsonl')]
+            join(DIR, f)) and f.startswith(f'blockchain_{self.name}') and f.endswith('.jsonl')]
 
         for filename in sorted(files, reverse=True):
-            start_dist, end_dist = -1, -1
-            with open(filename, 'r') as f:
-                start = Block.fromjson(f.readline())
-                if start.h > block.h:
-                    if start.t < block.t:
+            try:
+                start_dist, end_dist = -1, -1
+                with open(filename, 'r') as f:
+                    start = Block.fromjson(readline_non_empty(f))
+                    if start.h > block.h or start.h < 0:
+                        if start.t < block.t:
+                            return False
+                        start_dist = block.h - start.h
+                        continue
+
+                with FileReadBackwards(filename) as f:
+                    end = Block.fromjson(readline_non_empty(f))
+                    if end.h < block.h:
                         return False
-                    start_dist = block.h - start.h
-                    continue
+                    end_dist = end.h - block.h
+                    if end_dist < start_dist:
+                        temp = end
+                        while temp.h > block.h and temp.h >= 0:
+                            temp = Block.fromjson(readline_non_empty(f))
 
-            with FileReadBackwards(filename) as f:
-                end = Block.fromjson(f.readline())
-                if end.h < block.h:
-                    return False
-                end_dist = end.h - block.h
-                if end_dist < start_dist:
-                    temp = end
-                    while temp.h > block.h:
-                        temp = Block.fromjson(f.readline())
+                        return block == temp
 
-                    return block == temp
-
-            with open(filename, 'r') as f:
-                temp = Block.fromjson(f.readline())
-                while temp.h < block.h:
-                    temp = Block.fromjson(f.readline())
-
-                return block == temp
+                with open(filename, 'r') as f:
+                    try:
+                        while True:
+                            temp = Block.fromjson(readline_non_empty(f))
+                            if temp.h < 0 or temp.h >= block.h:
+                                break
+                        return block == temp
+                    except EOFError:
+                        return False
+            except EOFError:
+                raise
 
     def commit(self, t, h, cc) -> bool:
         i = h - self.head.h
@@ -282,15 +351,17 @@ class Node:
 
         PREFIXES = ['blockchain', 'commitment', 'leader']
         for file in os.listdir(DIR):
-            if any(file.startswith(f'{p}_{self.id}') for p in PREFIXES):
+            if any(file.startswith(f'{p}_{self.name}') for p in PREFIXES):
                 os.remove(join(DIR, file))
 
         for file in os.listdir(DIR):
             for p in PREFIXES:
-                fullpf = f'{p}_{node.id}'
+                fullpf = f'{p}_{node.name}'
                 if file.startswith(fullpf):
                     postfix = file[len(fullpf):]
-                    shutil.copyfile(join(DIR, file), join(DIR, f'{p}_{self.id}{postfix}'))
+                    shutil.copyfile(join(DIR, file), join(DIR, f'{p}_{self.name}{postfix}'))
+
+        # print([str(b) for b in self.read_blocks_since(0)])
 
         self.chain_f = open(join(DIR, self.filename('blockchain')), 'a')
         self.leader_f = open(join(DIR, self.filename('leader')), 'a')

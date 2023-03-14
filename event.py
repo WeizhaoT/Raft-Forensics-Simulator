@@ -6,6 +6,9 @@ from node import Node, Block
 
 
 class Etype(Enum):
+    INFO = -10
+    SET_FORK = -3
+    UNSET_FORK = -3
     AUTOLEAD = -2
     LEAD = -1
     ACK = 0
@@ -41,29 +44,16 @@ class Event:
             if isinstance(arg, Node):
                 argstrs.append(f'"Node-{arg.id}"')
             elif isinstance(arg, list):
-                block_strs, term, last_h = [], -1, -1
                 if len(arg) == 0:
                     argstrs.append('[]')
                     continue
 
-                if isinstance(arg[0], int):
+                if isinstance(arg[0], (int, str, float)):
                     argstrs.append('[' + ', '.join(str(i) for i in arg) + ']')
+                elif isinstance(arg[0], Block):
+                    argstrs.append(Block.strlist(arg))
                 else:
-                    for j, block in enumerate(arg + [Block(arg[-1].t+1, arg[-1].h+1, 0)]):
-                        if term < block.t:
-                            # block_strs.append(f'"{term}, {j}, {block}"')
-                            if j > 0:
-                                if block.h == last_h + 2:
-                                    block_strs.append(f'"{str(arg[j-1])}"')
-                                elif block.h >= last_h + 3:
-                                    block_strs.extend(['"..."', f'"{str(arg[j-1])}"'])
-
-                            if j < len(arg):
-                                term = block.t
-                                last_h = block.h
-                                block_strs.append(f'"{str(block)}"')
-
-                    argstrs.append('[' + ', '.join(block_strs) + ']')
+                    raise NotImplementedError
             elif isinstance(arg, (int, float)):
                 argstrs.append(f'{str(arg)}')
             else:
@@ -85,3 +75,9 @@ class TestEvents:
             [Event(None, Etype.TX, tc * tx_interval, f'{tc:4d}', tx_retry) for tc in range(1, tx_count+1)] +\
             [Event(None, Etype.AUTOLEAD, 1100)] + \
             [Event(None, Etype.AUTOLEAD, 2100)]
+
+    @staticmethod
+    def TEST_FORK_1(tx_count, tx_interval, tx_retry):
+        return [Event(None, Etype.SET_FORK, 0, 0), Event(None, Etype.LEAD, 0, 0)] + \
+            [Event(None, Etype.TX, tc * tx_interval, f'{tc:4d}', tx_retry) for tc in range(1, tx_count+1)] +\
+            [Event(None, Etype.LEAD, 1000, -1), Event(None, Etype.LEAD, 1100, 1)]
