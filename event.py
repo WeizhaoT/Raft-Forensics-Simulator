@@ -66,10 +66,15 @@ class Event:
 
 class TestEvents:
     @staticmethod
+    def TEST_TX(tx_count, tx_interval, tx_retry):
+        return [Event(None, Etype.LEAD, 0, 0)] + \
+            [Event(None, Etype.TX, tc * tx_interval, f'{tc:4d}', tx_retry) for tc in range(1, tx_count+1)]
+
+    @staticmethod
     def TEST_LEADER_CHANGE_1(tx_count, tx_interval, tx_retry):
         return [Event(None, Etype.LEAD, 0, 0)] + \
             [Event(None, Etype.TX, tc * tx_interval, f'{tc:4d}', tx_retry) for tc in range(1, tx_count+1)] +\
-            [Event(None, Etype.LEAD, 1000, -1), Event(None, Etype.LEAD, 1100, 2)]
+            [Event(None, Etype.AUTOLEAD, 1100, -1)]
 
     @staticmethod
     def TEST_LEADER_CHANGE_2(tx_count, tx_interval, tx_retry):

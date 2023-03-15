@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from colorama import Fore
 
+import os
+import shutil
 import heapq
 import time
 from typing import List, Tuple
@@ -14,15 +16,28 @@ import delays
 
 
 class Network:
-    def __init__(self, n, delay_mgr: delays.BaseDelay, tx_retry_time: int, adversary: None | int = None) -> None:
+    def __init__(
+        self,
+        n,
+        delay_mgr: delays.BaseDelay,
+        tx_retry_time: int,
+        datadir: str,
+        debug: bool,
+        adversary: None | int = None
+    ) -> None:
         assert n > 1
+
+        if os.path.exists(datadir):
+            shutil.rmtree(datadir)
+
+        os.makedirs(datadir)
 
         self.n = n
         self.tx_retry = tx_retry_time
         self.delay_mgr = delay_mgr
         self.leader: node.Node = None
         self.dummy = node.Node(-1, n)
-        self.nodes: List[node.Node] = [node.Node(id_=i, n=n) for i in range(n)]
+        self.nodes: List[node.Node] = [node.Node(id_=i, n=n, dir_=datadir) for i in range(n)]
         self.quorum = len(self.nodes) // 2 + 1
 
         self.aid = -1
@@ -31,6 +46,8 @@ class Network:
 
         self.leader_fork = False
         self.bad_vote = False
+
+        self.DEBUG = debug
 
         if adversary is not None:
             self.aid = adversary
@@ -73,14 +90,20 @@ class Network:
                 self.progress_commit = current_push
 
             leader.commit(*current_push, cc)
-            leader.write_log(evt.t, f'Commit block {str(leader.head)}, CC = {cc}')
-            for v in leader.listeners:
-                leader.write_log(evt.t, f'->{v.name} Ask to commit block {str(leader.head)}')
+
+            if self.DEBUG:
+                leader.write_log(evt.t, f'Commit block {str(leader.head)}, CC = {cc}')
+                for v in leader.listeners:
+                    leader.write_log(evt.t, f'->{v.name} Ask to commit block {str(leader.head)}')
+
             res = [event.Event(v, event.Etype.CMT, evt.t + self.delay(leader, v), *current_push, cc)
                    for v in leader.listeners]
         elif current_push == prog_commit:
             follower, _, _ = evt.args
-            leader.write_log(evt.t, f'->{follower.name} Ask to commit block {str(leader.head)}')
+
+            if self.DEBUG:
+                leader.write_log(evt.t, f'->{follower.name} Ask to commit block {str(leader.head)}')
+
             res = [event.Event(follower, event.Etype.CMT, evt.t + self.delay(leader, follower), *current_push, cc)]
 
         return res
@@ -197,8 +220,9 @@ class Network:
                     block = leader.accept_tx(tx)
                     self.progress[leader.id] = (block.t, block.h)
 
-                for v in leader.listeners:
-                    leader.write_log(evt.t, f'->{v.name} Replicating {node.Block.strlist([block])}')
+                if self.DEBUG:
+                    for v in leader.listeners:
+                        leader.write_log(evt.t, f'->{v.name} Replicating {node.Block.strlist([block])}')
 
                 return [event.Event(v, event.Etype.REP, evt.t + self.delay(leader, v), leader, leader.term, [block])
                         for v in leader.listeners]
@@ -209,22 +233,25 @@ class Network:
                     return []
         elif evt.type == event.Etype.REP:
             leader, term, blocks, = evt.args
-            if term < evt.subject.term:
+            if term < evt.subject.term or len(blocks) == 0:
                 return []
 
             follower = evt.subject
             res = follower.handle_append_entries(blocks)
             if res == node.Rtype.YES:
                 if follower.set_acked():
-                    follower.write_log(evt.t, f'{leader.name}-> {node.Block.strlist(blocks)} Replication accepted')
+                    if self.DEBUG:
+                        follower.write_log(evt.t, f'{leader.name}-> {node.Block.strlist(blocks)} Replication accepted')
                     return [event.Event(leader, event.Etype.ACK, evt.t + self.delay(follower, leader), follower, blocks[-1].t, blocks[-1].h)]
             elif res == node.Rtype.KEEP:
-                if follower.set_asked():
-                    follower.write_log(
-                        evt.t, f'{leader.name}-> {node.Block.strlist(blocks)} Replication needs more blocks')
+                if follower.set_asked(blocks[-1].h):
+                    if self.DEBUG:
+                        follower.write_log(
+                            evt.t, f'{leader.name}-> {node.Block.strlist(blocks)} Replication needs more blocks')
                     return [event.Event(leader, event.Etype.R2, evt.t + self.delay(follower, leader), follower, follower.head.h)]
             else:
-                follower.write_log(evt.t, f'{leader.name}-> {node.Block.strlist(blocks)} Replication rejected')
+                if self.DEBUG:
+                    follower.write_log(evt.t, f'{leader.name}-> {node.Block.strlist(blocks)} Replication rejected')
                 return []
 
             return []
@@ -235,8 +262,9 @@ class Network:
             follower, t, h, = evt.args
             fid = follower.id
 
-            follower.write_log(evt.t, f'->{evt.subject.name} ACK term {t} and height {h}')
-            evt.subject.write_log(evt.t, f'{follower.name}-> ACK term {t} and height {h}')
+            if self.DEBUG:
+                follower.write_log(evt.t, f'->{evt.subject.name} ACK term {t} and height {h}')
+                evt.subject.write_log(evt.t, f'{follower.name}-> ACK term {t} and height {h}')
             if evt.subject.adversarial:
                 if self.adversarial_progress[fid] < (t, h):
                     self.adversarial_progress[fid] = (t, h)
@@ -254,28 +282,32 @@ class Network:
             follower, fh, = evt.args
             leader = evt.subject
             blocks = leader.read_blocks_since(fh)
-            follower.write_log(evt.t, f'->{leader.name} ask for more blocks from height {fh}')
-            leader.write_log(evt.t, f'{follower.name}-> send more blocks: {node.Block.strlist(blocks)}')
+            if self.DEBUG:
+                follower.write_log(evt.t, f'->{leader.name} ask for more blocks from height {fh}')
+                leader.write_log(evt.t, f'{follower.name}-> send more blocks: {node.Block.strlist(blocks)}')
             return [event.Event(follower, event.Etype.REP, evt.t + self.delay(leader, follower), leader, leader.term, blocks)]
         elif evt.type == event.Etype.CMT:
             t, h, cc = evt.args
             follower = evt.subject
             res = follower.commit(t, h, cc)
-            if res:
-                evt.subject.write_log(evt.t, f'Commit block {str(follower.head)}, CC = {cc}')
-            else:
-                evt.subject.write_log(evt.t, f'Refuse to commit block at term {t}, height {h}')
+            if self.DEBUG:
+                if res == node.Rtype.YES:
+                    evt.subject.write_log(evt.t, f'Commit block {str(follower.head)}, CC = {cc}')
+                elif res == node.Rtype.REJ:
+                    evt.subject.write_log(evt.t, f'Refuse to commit block at term {t}, height {h}')
+                elif res == node.Rtype.NO:
+                    evt.subject.write_log(evt.t, f'Block-to-commit is old at term {t}, height {h}')
+                elif res == node.Rtype.KEEP:
+                    evt.subject.write_log(evt.t, f'Block-to-commit is too new at term {t}, height {h}')
 
             return []
 
-    def run(self, period, maxtime, events, sleep=0, debug=True):
+    def run(self, period, maxtime, events, sleep=0):
         heapq.heapify(events)
 
         bar = tqdm(total=maxtime // period)
 
-        ef = None
-        if debug:
-            ef = open('event.log', 'w')
+        ef = open('event.log', 'w') if self.DEBUG else None
 
         lock = threading.Lock()
         global looping
@@ -304,15 +336,15 @@ class Network:
                         for new_event in new_events:
                             heapq.heappush(events, new_event)
 
-                        if debug:
+                        if self.DEBUG:
                             ef.write(f'{str(event)}\n')
 
-                    if debug:
+                    if self.DEBUG:
                         ef.flush()
 
                     prog = f'{self.progress_commit[1]}||{Fore.LIGHTRED_EX}{self.adversarial_commit[1]}{Fore.LIGHTBLUE_EX}' if self.forking else f'{self.progress_commit[1]}'
 
-                    bar.set_description(f'{Fore.LIGHTBLUE_EX}[{t} ms @ {prog}]{Fore.RESET} ' +
+                    bar.set_description(f'{Fore.LIGHTBLUE_EX}[{node.ms_to_str(t)} @ {prog}]{Fore.RESET} ' +
                                         ' '.join(self.brief(v) for v in self.nodes))
                     bar.update()
 
@@ -334,7 +366,7 @@ class Network:
         if self.adversary:
             self.adversary.flush_uncommitted()
 
-        if debug:
+        if self.DEBUG:
             ef.close()
 
     def handle_new_leader(self, evt: event.Event):
@@ -363,8 +395,9 @@ class Network:
         for args in prep:
             leader, acc, term, lc, _ = args
             self.prepare_for_new_leader(*args)
-            leader.write_log(evt.t, f'Becoming leader of term {term}; accepting followers '
-                             f'{list(map(lambda x: x.id, acc))}, LC = {lc}')
+            if self.DEBUG:
+                leader.write_log(evt.t, f'Becoming leader of term {term}; accepting followers '
+                                 f'{list(map(lambda x: x.id, acc))}, LC = {lc}')
 
         return [event.Event(None, event.Etype.INFO, evt.t, "fork", id1, id2)] if to_fork else []
 

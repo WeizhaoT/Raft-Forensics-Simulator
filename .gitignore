@@ -2,5 +2,6 @@ logs
 *.log
 __pycache__
 .vscode
+.VSCodeCounter
 *.txt
 test.py
