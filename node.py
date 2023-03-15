@@ -177,9 +177,6 @@ class Node:
 
         written = 0
         while written < len(items):
-            # if prefix != 'log':
-            #     print(self.id, prefix, self.fds[prefix].name, [str_call(i) for i in items])
-
             writable = len(items) - written
             if FILESIZES[prefix] > 0:
                 writable = min(self.linequota[prefix], writable)
@@ -442,12 +439,12 @@ class Node:
             if any(file.startswith(f'{p}_{self.name}') for p in prefixes):
                 os.remove(join(self.dir, file))
 
-        for file in os.listdir(self.dir):
+        for file in os.listdir(node.dir):
             for p in prefixes:
                 fullpf = f'{p}_{node.name}'
                 if file.startswith(fullpf):
                     postfix = file[len(fullpf):]
-                    shutil.copyfile(join(self.dir, file), join(self.dir, f'{p}_{self.name}{postfix}'))
+                    shutil.copyfile(join(node.dir, file), join(self.dir, f'{p}_{self.name}{postfix}'))
 
         for p in prefixes:
             if p not in FILESIZES:
