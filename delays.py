@@ -57,6 +57,19 @@ class ModuloDelay(BaseDelay):
         return (abs(n2 - n1) % self.n) * self.step + self.start
 
 
+# Special delay for testing "bad vote"
+class ModuloSplitDelay(BaseDelay):
+    def __init__(self, n, start, step) -> None:
+        super().__init__(n)
+        self.start = start
+        self.step = step
+
+    def __call__(self, n1, n2) -> int:
+        super().__call__(n1, n2)
+        n1, n2 = (n1-self.base) % self.n, (n2-self.base) % self.n
+        return self.start if abs(n2 - n1) * 2 < self.n else self.start + self.step
+
+
 class ModuloRandomDelay(BaseDelay):
     def __init__(self, n: int, start: int, step: int, rand_mult: float) -> None:
         super().__init__(n)

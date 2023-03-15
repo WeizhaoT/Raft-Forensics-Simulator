@@ -1,6 +1,6 @@
 from __future__ import annotations
 from enum import Enum
-from typing import List
+from typing import List, Callable
 
 import node
 
@@ -64,33 +64,55 @@ class Event:
         return f'{{"time": {int(self.t)}, "type": "{self.type.name}", "node": {int(self.subject.id)}, "args": [{argstr}]}}'
 
 
+class EventPlan:
+    def __init__(self, type: Etype, count: int, start: int, interval: int, args_func: Callable[[int], tuple] = lambda x: tuple([])) -> None:
+        self.type = type
+        self.count = count
+        self.start = start
+        self.interval = interval
+        self.args_func = args_func
+
+        self.maxt = self.start + self.interval * (self.count - 1)
+        self.c = 0
+
+    def events_until(self, t):
+        events = []
+        t0 = self.start + self.c * self.interval
+        while t0 <= t and self.c < self.count:
+            events.append(Event(None, self.type, t0, *self.args_func(self.c)))
+            self.c += 1
+            t0 += self.interval
+
+        return events
+
+
 class TestEvents:
     @staticmethod
     def TEST_TX(tx_count, tx_interval, tx_retry):
-        return [Event(None, Etype.LEAD, 0, 0)] + \
-            [Event(None, Etype.TX, tc * tx_interval, f'{tc:4d}', tx_retry) for tc in range(1, tx_count+1)]
+        fmt = f'{{:0{len(str(tx_count))}d}}'
+        return [Event(None, Etype.LEAD, 0, 0)], \
+            [EventPlan(Etype.TX, tx_count, tx_interval, tx_interval, lambda i: (fmt.format(i+1), tx_retry,))]
 
     @staticmethod
     def TEST_LEADER_CHANGE_1(tx_count, tx_interval, tx_retry):
-        return [Event(None, Etype.LEAD, 0, 0)] + \
-            [Event(None, Etype.TX, tc * tx_interval, f'{tc:4d}', tx_retry) for tc in range(1, tx_count+1)] +\
-            [Event(None, Etype.AUTOLEAD, 1100, -1)]
+        fmt = f'{{:0{len(str(tx_count))}d}}'
+        return [Event(None, Etype.LEAD, 0, 0), Event(None, Etype.AUTOLEAD, 1100, -1)], \
+            [EventPlan(Etype.TX, tx_count, tx_interval, tx_interval, lambda i: (fmt.format(i+1), tx_retry,))]
 
     @staticmethod
     def TEST_LEADER_CHANGE_2(tx_count, tx_interval, tx_retry):
-        return [Event(None, Etype.LEAD, 0, 0)] + \
-            [Event(None, Etype.TX, tc * tx_interval, f'{tc:4d}', tx_retry) for tc in range(1, tx_count+1)] +\
-            [Event(None, Etype.AUTOLEAD, 1100)] + \
-            [Event(None, Etype.AUTOLEAD, 2100)]
+        fmt = f'{{:0{len(str(tx_count))}d}}'
+        return [Event(None, Etype.LEAD, 0, 0), Event(None, Etype.AUTOLEAD, 1100), Event(None, Etype.AUTOLEAD, 2100)], \
+            [EventPlan(Etype.TX, tx_count, tx_interval, tx_interval, lambda i: (fmt.format(i+1), tx_retry,))]
 
     @staticmethod
     def TEST_FORK_1(tx_count, tx_interval, tx_retry):
-        return [Event(None, Etype.SET_FORK, 0), Event(None, Etype.LEAD, 0, 0)] + \
-            [Event(None, Etype.TX, tc * tx_interval, f'{tc:4d}', tx_retry) for tc in range(1, tx_count+1)] +\
-            [Event(None, Etype.LEAD, 1000, -1), Event(None, Etype.LEAD, 1100, 1)]
+        fmt = f'{{:0{len(str(tx_count))}d}}'
+        return [Event(None, Etype.SET_FORK, 0), Event(None, Etype.LEAD, 0, 0), Event(None, Etype.LEAD, 1000, -1), Event(None, Etype.LEAD, 1100, 1)], \
+            [EventPlan(Etype.TX, tx_count, tx_interval, tx_interval, lambda i: (fmt.format(i+1), tx_retry,))]
 
     @staticmethod
     def TEST_BAD_VOTE_1(tx_count, tx_interval, tx_retry):
-        return [Event(None, Etype.SET_BAD_VOTE, 0), Event(None, Etype.LEAD, 0, 0)] + \
-            [Event(None, Etype.TX, tc * tx_interval, f'{tc:4d}', tx_retry) for tc in range(1, tx_count+1)] +\
-            [Event(None, Etype.AUTOLEAD, 1100)]
+        fmt = f'{{:0{len(str(tx_count))}d}}'
+        return [Event(None, Etype.SET_BAD_VOTE, 0), Event(None, Etype.LEAD, 0, 0), Event(None, Etype.AUTOLEAD, 2500)], \
+            [EventPlan(Etype.TX, tx_count, tx_interval, tx_interval, lambda i: (fmt.format(i+1), tx_retry,))]

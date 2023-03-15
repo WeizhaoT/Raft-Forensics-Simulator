@@ -4,15 +4,17 @@ import argparse
 import node
 from event import TestEvents
 from network import Network
-from delays import BaseDelay, ConstantDelay, UniformDelay, ModuloDelay, ModuloRandomDelay
+from delays import BaseDelay, ConstantDelay, UniformDelay, ModuloDelay, ModuloSplitDelay, ModuloRandomDelay
 
 
 def main(period, maxtime):
     n = 5
-    net = Network(n, ModuloRandomDelay(n, 0, step=100, rand_mult=2.0), tx_retry_time=500, datadir='logs', debug=True)
-    events = TestEvents.TEST_LEADER_CHANGE_2(tx_count=111, tx_interval=50, tx_retry=20)
-    # events = TestEvents.TEST_BAD_VOTE_1(tx_count=100, tx_interval=50, tx_retry=20)
-    net.run(period, maxtime, events, sleep=.1)
+    # delay = ModuloSplitDelay(n, 100, 300)
+    delay = ModuloRandomDelay(n, 0, step=100, rand_mult=2.0)
+    net = Network(n, delay, tx_retry_time=500, datadir='logs', adversary=1, debug=True)
+    # events = TestEvents.TEST_LEADER_CHANGE_2(tx_count=111, tx_interval=50, tx_retry=20)
+    events, plans = TestEvents.TEST_BAD_VOTE_1(tx_count=100, tx_interval=50, tx_retry=20)
+    net.run(period, maxtime, events, plans, sleep=.1)
 
 
 if __name__ == '__main__':

@@ -302,8 +302,9 @@ class Network:
 
             return []
 
-    def run(self, period, maxtime, events, sleep=0):
+    def run(self, period: int, maxtime: int, events: List[event.Event], plans: List[event.EventPlan], sleep: int = 0):
         heapq.heapify(events)
+        maxt_plans = max(plan.maxt for plan in plans)
 
         bar = tqdm(total=maxtime // period)
 
@@ -317,13 +318,18 @@ class Network:
             global looping
 
             if t + period < maxtime and looping:
-                if events:
+                if events or t < maxt_plans:
                     threading.Timer(sleep, proceed, (t + period,)).start()
                 else:
                     threading.Timer(0, proceed, (t + period,)).start()
 
             with lock:
                 try:
+                    for plan in plans:
+                        planned = plan.events_until(t)
+                        for evt in planned:
+                            heapq.heappush(events, evt)
+
                     while events and events[0].t <= t:
                         event = heapq.heappop(events)
                         new_events = self.resolve(event)
