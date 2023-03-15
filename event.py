@@ -85,34 +85,32 @@ class EventPlan:
 
         return events
 
+    @staticmethod
+    def TX_PLAN(tx_count, tx_interval, tx_retry):
+        return EventPlan(Etype.TX, tx_count, tx_interval, tx_interval, lambda i: (node.fmt_int(i+1, tx_count), tx_retry))
+
 
 class TestEvents:
     @staticmethod
     def TEST_TX(tx_count, tx_interval, tx_retry):
-        fmt = f'{{:0{len(str(tx_count))}d}}'
-        return [Event(None, Etype.LEAD, 0, 0)], \
-            [EventPlan(Etype.TX, tx_count, tx_interval, tx_interval, lambda i: (fmt.format(i+1), tx_retry,))]
+        return [Event(None, Etype.LEAD, 0, 0)], [EventPlan.TX_PLAN(tx_count, tx_interval, tx_retry)]
 
     @staticmethod
     def TEST_LEADER_CHANGE_1(tx_count, tx_interval, tx_retry):
-        fmt = f'{{:0{len(str(tx_count))}d}}'
-        return [Event(None, Etype.LEAD, 0, 0), Event(None, Etype.AUTOLEAD, 1100, -1)], \
-            [EventPlan(Etype.TX, tx_count, tx_interval, tx_interval, lambda i: (fmt.format(i+1), tx_retry,))]
+        return [Event(None, Etype.LEAD, 0, 0), Event(None, Etype.AUTOLEAD, 1100, -1)],\
+            [EventPlan.TX_PLAN(tx_count, tx_interval, tx_retry)]
 
     @staticmethod
     def TEST_LEADER_CHANGE_2(tx_count, tx_interval, tx_retry):
-        fmt = f'{{:0{len(str(tx_count))}d}}'
-        return [Event(None, Etype.LEAD, 0, 0), Event(None, Etype.AUTOLEAD, 1100), Event(None, Etype.AUTOLEAD, 2100)], \
-            [EventPlan(Etype.TX, tx_count, tx_interval, tx_interval, lambda i: (fmt.format(i+1), tx_retry,))]
+        return [Event(None, Etype.LEAD, 0, 0), Event(None, Etype.AUTOLEAD, 1100), Event(None, Etype.AUTOLEAD, 2100)],\
+            [EventPlan.TX_PLAN(tx_count, tx_interval, tx_retry)]
 
     @staticmethod
     def TEST_FORK_1(tx_count, tx_interval, tx_retry):
-        fmt = f'{{:0{len(str(tx_count))}d}}'
-        return [Event(None, Etype.SET_FORK, 0), Event(None, Etype.LEAD, 0, 0), Event(None, Etype.LEAD, 1000, -1), Event(None, Etype.LEAD, 1100, 1)], \
-            [EventPlan(Etype.TX, tx_count, tx_interval, tx_interval, lambda i: (fmt.format(i+1), tx_retry,))]
+        return [Event(None, Etype.SET_FORK, 0), Event(None, Etype.LEAD, 0, 0), Event(None, Etype.LEAD, 1000, -1),
+                Event(None, Etype.LEAD, 1100, 1)], [EventPlan.TX_PLAN(tx_count, tx_interval, tx_retry)]
 
     @staticmethod
     def TEST_BAD_VOTE_1(tx_count, tx_interval, tx_retry):
-        fmt = f'{{:0{len(str(tx_count))}d}}'
-        return [Event(None, Etype.SET_BAD_VOTE, 0), Event(None, Etype.LEAD, 0, 0), Event(None, Etype.AUTOLEAD, 2500)], \
-            [EventPlan(Etype.TX, tx_count, tx_interval, tx_interval, lambda i: (fmt.format(i+1), tx_retry,))]
+        return [Event(None, Etype.SET_BAD_VOTE, 0), Event(None, Etype.LEAD, 0, 0), Event(None, Etype.AUTOLEAD, 2500)],\
+            [EventPlan.TX_PLAN(tx_count, tx_interval, tx_retry)]

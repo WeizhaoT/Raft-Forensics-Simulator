@@ -19,6 +19,11 @@ FILESIZES = {
 }
 
 
+def fmt_int(i, imax, zero=True):
+    fmt = f'{{:0{len(str(imax))}d}}' if zero else f'{{:{len(str(imax))}d}}'
+    return fmt.format(i)
+
+
 def ms_to_str(t: int | float):
     s, ms = divmod(int(t), 1000)
     m, s = divmod(s, 60)

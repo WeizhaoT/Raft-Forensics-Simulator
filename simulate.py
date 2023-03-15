@@ -9,11 +9,14 @@ from delays import BaseDelay, ConstantDelay, UniformDelay, ModuloDelay, ModuloSp
 
 def main(period, maxtime):
     n = 5
-    # delay = ModuloSplitDelay(n, 100, 300)
-    delay = ModuloRandomDelay(n, 0, step=100, rand_mult=2.0)
-    net = Network(n, delay, tx_retry_time=500, datadir='logs', adversary=1, debug=True)
-    # events = TestEvents.TEST_LEADER_CHANGE_2(tx_count=111, tx_interval=50, tx_retry=20)
+    # BAD VOTE:
+    delay = ModuloSplitDelay(n, 100, 300)
     events, plans = TestEvents.TEST_BAD_VOTE_1(tx_count=100, tx_interval=50, tx_retry=20)
+
+    # NORMAL:
+    # delay = ModuloRandomDelay(n, 0, step=100, rand_mult=2.0)
+    # events, plans = TestEvents.TEST_LEADER_CHANGE_2(tx_count=111, tx_interval=50, tx_retry=20)
+    net = Network(n, delay, tx_retry_time=500, datadir='logs', adversary=1, debug=True)
     net.run(period, maxtime, events, plans, sleep=.1)
 
 

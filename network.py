@@ -30,14 +30,19 @@ class Network:
         if os.path.exists(datadir):
             shutil.rmtree(datadir)
 
+        def nodedir(i, adv=False):
+            return os.path.join(datadir, ('a' if adv else '') + node.fmt_int(i, n-1))
+
         os.makedirs(datadir)
+        for i in range(n):
+            os.makedirs(nodedir(i))
 
         self.n = n
         self.tx_retry = tx_retry_time
         self.delay_mgr = delay_mgr
         self.leader: node.Node = None
         self.dummy = node.Node(-1, n)
-        self.nodes: List[node.Node] = [node.Node(id_=i, n=n, dir_=datadir) for i in range(n)]
+        self.nodes: List[node.Node] = [node.Node(id_=i, n=n, dir_=nodedir(i)) for i in range(n)]
         self.quorum = len(self.nodes) // 2 + 1
 
         self.aid = -1
@@ -50,8 +55,9 @@ class Network:
         self.DEBUG = debug
 
         if adversary is not None:
+            os.makedirs(nodedir(adversary, True))
             self.aid = adversary
-            self.adversary = node.Node(id_=adversary, n=n, adversarial=True)
+            self.adversary = node.Node(id_=adversary, n=n, dir_=nodedir(adversary, True), adversarial=True)
             self.adversarial_progress = {i: (0, 0) for i in range(n)}
             self.adversarial_commit = (0, 0)
         else:
