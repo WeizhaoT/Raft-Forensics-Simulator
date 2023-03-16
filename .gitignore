@@ -6,3 +6,6 @@ __pycache__
 *.txt
 test.py
 *.sh
+figs
+audit_all.py
+plot.py

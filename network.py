@@ -227,7 +227,7 @@ class Network:
             if self.DEBUG:
                 self.nodes[self.aid].write_log(evt.t, f'casted a bad vote for {new_leader}')
             self.bad_vote = True
-            print(new_leader, ', '.join(f'{i.name}: {i.freshness}/({i.head.t}, {i.head.h})' for i in nrank))
+            # print(new_leader, ', '.join(f'{i.name}: {i.freshness}/({i.head.t}, {i.head.h})' for i in nrank))
             return [event.Event(None, event.Etype.LEAD, evt.t, new_leader)]
         elif evt.type == event.Etype.LEAD:
             return self.handle_new_leader(evt)

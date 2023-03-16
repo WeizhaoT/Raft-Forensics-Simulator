@@ -255,6 +255,7 @@ def check_node_integrity(dir_, name, n) -> Tuple[bool, int, dict, dict, dict]:
 
     chain_total = time.time() - start
     timer[('load', 'chain')] += chain_total - timer[('validate', 'chain')]
+    timer[('count', 'chain')] = cc['h'] + 1
     bar.close()
     return True, max_num, cc, lc_list, timer
 
@@ -367,9 +368,9 @@ def pair_find_adversary(size, fi, fj, ci, cj, cci, ccj, lci, lcj):
 
     kh1, kh2 = find_file_range_by_term(term, min(kl, ch), min(kl, ch), fh)
 
-    assert kh2 >= kl
+    assert kh2 >= kh1
     next_term = -1
-    for k in range(max(kl, kh1), kh2+1):
+    for k in range(kh1, kh2+1):
         blocks_h: List[node.Block] = read_all_blocks(fh(k))
         if kl <= k <= cl:
             blocks_l: List[node.Block] = read_all_blocks(fl(k))
@@ -460,7 +461,10 @@ def audit_raft_logs(path: str, n: int):
 
     meta_timer.update(FUNC_TIMER)
     meta_timer = flatten_dict.unflatten(dict(meta_timer))
-    print(json.dumps(meta_timer, indent=4))
+    meta_timer['adv'] = list(adversarial)
+    with open(join(path, 'audit.json'), 'w') as f:
+        json.dump(meta_timer, f, indent=4)
+
     print(adversarial)
 
 
