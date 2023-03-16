@@ -8,9 +8,9 @@ import node
 class Etype(Enum):
     INFO = -10
     SET_FORK = -6
-    SET_BAD_VOTE = -5
-    UNSET_FORK = -4
-    UNSET_BAD_VOTE = -3
+    UNSET_FORK = -5
+    FORK = -4
+    BADVOTELEAD = -3
     AUTOLEAD = -2
     LEAD = -1
     ACK = 0
@@ -89,6 +89,10 @@ class EventPlan:
     def TX_PLAN(tx_count, tx_interval, tx_retry):
         return EventPlan(Etype.TX, tx_count, tx_interval, tx_interval, lambda i: (node.fmt_int(i+1, tx_count), tx_retry))
 
+    @staticmethod
+    def LE_PLAN(le_count, le_interval):
+        return EventPlan(Etype.AUTOLEAD, le_count, le_interval, le_interval, lambda _: tuple())
+
 
 class TestEvents:
     @staticmethod
@@ -114,3 +118,23 @@ class TestEvents:
     def TEST_BAD_VOTE_1(tx_count, tx_interval, tx_retry):
         return [Event(None, Etype.SET_BAD_VOTE, 0), Event(None, Etype.LEAD, 0, 0), Event(None, Etype.AUTOLEAD, 2500)],\
             [EventPlan.TX_PLAN(tx_count, tx_interval, tx_retry)]
+
+    @staticmethod
+    def NORMAL(tx_count, tx_interval, tx_retry, le_freq):
+        return [Event(None, Etype.LEAD, 0, 0)], \
+            [EventPlan.TX_PLAN(tx_count, tx_interval, tx_retry), EventPlan.LE_PLAN(
+                int(tx_count // le_freq) if le_freq > 0 else 0, int(tx_interval * le_freq))],
+
+    @staticmethod
+    def BAD_VOTE(tx_count, tx_interval, tx_retry, le_freq, depth):
+        t = tx_interval + int(depth * (tx_count - 1) * tx_interval)
+        return [Event(None, Etype.BADVOTELEAD, t), Event(None, Etype.LEAD, 0, 0)], \
+            [EventPlan.TX_PLAN(tx_count, tx_interval, tx_retry), EventPlan.LE_PLAN(
+                int(tx_count // le_freq) if le_freq > 0 else 0, int(tx_interval * le_freq))],
+
+    @staticmethod
+    def LEADER_FORK(tx_count, tx_interval, tx_retry, le_freq, depth):
+        t = tx_interval + int(depth * (tx_count - 1) * tx_interval)
+        return [Event(None, Etype.FORK, t), Event(None, Etype.LEAD, 0, 0)], \
+            [EventPlan.TX_PLAN(tx_count, tx_interval, tx_retry), EventPlan.LE_PLAN(
+                int(tx_count // le_freq) if le_freq > 0 else 0, int(tx_interval * le_freq))],

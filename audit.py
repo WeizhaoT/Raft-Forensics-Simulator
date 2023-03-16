@@ -3,9 +3,12 @@ from __future__ import annotations
 import time
 import os
 import json
+import hashlib
+import ecdsa
 import argparse
 import flatten_dict
 
+from tqdm import tqdm
 from collections import defaultdict
 from os.path import join, isdir
 from typing import List, Tuple, Set
@@ -13,12 +16,36 @@ from file_read_backwards import FileReadBackwards
 
 import node
 
+HASH = hashlib.sha256()
+SECKEY = ecdsa.SigningKey.generate(curve=ecdsa.NIST256p, entropy=ecdsa.util.PRNG(b'srf'))
+PUBKEY = SECKEY.get_verifying_key()
+MSG = b'rpg'
+HASH.update(MSG)
+DIGEST = HASH.digest()
+SIG = SECKEY.sign(MSG, entropy=ecdsa.util.PRNG(b'sgg'), hashfunc=hashlib.sha256)
+
+
+FUNC_TIMER = defaultdict(float)
+
 
 def is_valid_int(k, n):
     if n > 0:
         return isinstance(k, int) and 0 <= k < n
     else:
         return isinstance(k, int) and 0 <= k
+
+
+def check_sig(pubkey: ecdsa.VerifyingKey = PUBKEY, sig: bytes = SIG, msg: bytes = MSG, skip: bool = True):
+    start = time.time()
+    if skip:
+        res = True
+    else:
+        hash = hashlib.sha256()
+        hash.update(msg)
+        res = pubkey.verify_digest(sig, hash.digest())
+    FUNC_TIMER[('check_sig', 'elapsed')] += time.time() - start
+    FUNC_TIMER[('check_sig', 'num_calls')] += 1
+    return res
 
 
 def get_edge_block(path, last=False):
@@ -163,6 +190,10 @@ def check_node_integrity(dir_, name, n) -> Tuple[bool, int, dict, dict, dict]:
                     if any(not is_valid_int(k, n) for k in entry['voters']):
                         raise ValueError(f'Illegal voter in LC {entry["voters"]} of term {term} in dir {dir_}')
 
+                    for k in entry['voters']:
+                        if not check_sig():
+                            raise ValueError(f'Illegal sig by voter {k} in LC of term {term} in dir {dir_}')
+
                     lc_list[term] = entry
 
             timer[('load', 'leader')] += time.time() - start
@@ -179,12 +210,18 @@ def check_node_integrity(dir_, name, n) -> Tuple[bool, int, dict, dict, dict]:
                         raise ValueError(f'Insufficient voter in CC {entry["voters"]} of term {term} in dir {dir_}')
                     if any(not is_valid_int(k, n) for k in cc['voters']):
                         raise ValueError(f'Illegal voter in CC {cc["voters"]} of term {term} in dir {dir_}')
+
+                    for k in cc['voters']:
+                        if not check_sig():
+                            raise ValueError(f'Illegal sig by voter {k} in CC of term {term} in dir {dir_}')
             else:
                 raise ValueError(f'Duplicate CC in dir {dir_}')
 
             timer[('load', 'commitment')] += time.time() - start
 
     predecessor, current = None, None
+    bar = tqdm(desc=f'Verifying blockchain data', total=cc['h'] + 1)
+
     start = time.time()
     for i in range(max_num + 1):
         with open(join(dir_, f'blockchain_{name}_{node.fmt_int(i, max_num)}.jsonl'), 'r') as f:
@@ -198,20 +235,27 @@ def check_node_integrity(dir_, name, n) -> Tuple[bool, int, dict, dict, dict]:
                 current = node.Block.fromjson(line)
 
                 start2 = time.time()
-                predicate = (predecessor is None and current != node.Block(0, 0, -1)) or \
-                    (predecessor is not None and not current.follows(predecessor)) or \
-                    (predecessor is not None and current.t not in lc_list)
+                if predecessor is None:
+                    predicate = current != node.Block(0, 0, -1)
+                else:
+                    predicate = not current.follows(predecessor, check_hash=True) or \
+                        current.t not in lc_list or \
+                        not check_sig()
                 timer[('validate', 'chain')] += time.time() - start2
 
                 if predicate:
                     chain_total = time.time() - start
                     timer[('load', 'chain')] += chain_total - timer[('validate', 'chain')]
+                    bar.set_description(f'Blockchain corrupt')
+                    bar.close()
                     return False, max_num, cc, lc_list, timer
 
                 predecessor = current
+                bar.update()
 
     chain_total = time.time() - start
     timer[('load', 'chain')] += chain_total - timer[('validate', 'chain')]
+    bar.close()
     return True, max_num, cc, lc_list, timer
 
 
@@ -219,6 +263,7 @@ def pair_consistency_check(i, j, fi, fj, maxc):
     ci, cj = maxc[i], maxc[j]
 
     timer = {}
+    start = time.time()
     consistency = None
 
     if ci != cj:
@@ -290,6 +335,7 @@ def pair_consistency_check(i, j, fi, fj, maxc):
                         break
 
     assert consistency is not None
+    timer[('validate', 'pair consistency')] = time.time() - start
     return consistency, timer
 
 
@@ -300,7 +346,7 @@ def pair_find_adversary(size, fi, fj, ci, cj, cci, ccj, lci, lcj):
         timer[('find', )] = time.time() - start
         return [lci[cci['t']]['leader']], timer
 
-    fl, fh, cl, ch, ccl, cch, lcl, lch = (fi, fj, ci, cj, cci, ccj, lci, lcj) if cci['t'] < ccj['t'] else\
+    fl, fh, cl, ch, ccl, cch, lcl, lch = (fi, fj, ci, cj, cci, ccj, lci, lcj) if cci['t'] < ccj['t'] else \
         (fj, fi, cj, ci, ccj, cci, lcj, lci)
 
     term, kl = min(cci['t'], ccj['t']), ccl['h'] // size
@@ -401,7 +447,6 @@ def audit_raft_logs(path: str, n: int):
             if i >= j:
                 continue
             consistency, timer = pair_consistency_check(i, j, chain_file_func(i), chain_file_func(j), maxc)
-            print(i, j, consistency)
 
             for key in timer:
                 meta_timer[key] += timer[key]
@@ -413,6 +458,7 @@ def audit_raft_logs(path: str, n: int):
                 for key in timer:
                     meta_timer[key] += timer[key]
 
+    meta_timer.update(FUNC_TIMER)
     meta_timer = flatten_dict.unflatten(dict(meta_timer))
     print(json.dumps(meta_timer, indent=4))
     print(adversarial)

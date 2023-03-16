@@ -5,3 +5,4 @@ __pycache__
 .VSCodeCounter
 *.txt
 test.py
+*.sh

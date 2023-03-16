@@ -67,7 +67,8 @@ class ModuloSplitDelay(BaseDelay):
     def __call__(self, n1, n2) -> int:
         super().__call__(n1, n2)
         n1, n2 = (n1-self.base) % self.n, (n2-self.base) % self.n
-        return self.start if abs(n2 - n1) * 2 < self.n else self.start + self.step
+        return self.start * abs(n2 - n1) if abs(n2 - n1) * 2 < self.n else \
+            self.start * (abs(n2 - n1) - self.n // 2) + self.step
 
 
 class ModuloRandomDelay(BaseDelay):

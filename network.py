@@ -9,6 +9,7 @@ import time
 from typing import List, Tuple
 from tqdm import tqdm
 import threading
+from collections import defaultdict
 
 import node
 import event
@@ -102,7 +103,7 @@ class Network:
                 for v in leader.listeners:
                     leader.write_log(evt.t, f'->{v.name} Ask to commit block {str(leader.head)}')
 
-            res = [event.Event(v, event.Etype.CMT, evt.t + self.delay(leader, v), *current_push, cc)
+            res = [event.Event(v, event.Etype.CMT, evt.t + self.delay(leader, v), leader, *current_push, cc)
                    for v in leader.listeners]
         elif current_push == prog_commit:
             follower, _, _ = evt.args
@@ -110,7 +111,8 @@ class Network:
             if self.DEBUG:
                 leader.write_log(evt.t, f'->{follower.name} Ask to commit block {str(leader.head)}')
 
-            res = [event.Event(follower, event.Etype.CMT, evt.t + self.delay(leader, follower), *current_push, cc)]
+            res = [event.Event(follower, event.Etype.CMT, evt.t +
+                               self.delay(leader, follower), leader, *current_push, cc)]
 
         return res
 
@@ -191,25 +193,41 @@ class Network:
         elif evt.type == event.Etype.UNSET_FORK:
             self.leader_fork = False
             return []
-        elif evt.type == event.Etype.SET_BAD_VOTE:
-            self.bad_vote = True
-            return []
-        elif evt.type == event.Etype.UNSET_BAD_VOTE:
-            self.bad_vote = False
-            return []
         elif evt.type == event.Etype.AUTOLEAD:
             if self.forking:
                 nrank = sorted(self.leader.peers, key=lambda v: v.freshness, reverse=True)
                 new_leader = nrank[1].id if nrank[1] != self.aid else nrank[0].id
                 self.leader.steal_from(self.nodes[new_leader])
-            elif self.bad_vote:
-                nrank = sorted(self.leader.peers, key=lambda v: v.freshness, reverse=True)
-                new_leader = nrank[-self.quorum + 1].id
-                self.nodes[self.aid].steal_from(self.nodes[new_leader])
+            elif self.leader_fork:  # or (self.bad_vote and self.leader.id != self.aid):
+                new_leader = self.aid
+                self.nodes[self.aid].steal_from(self.leader)
             else:
                 nrank = sorted(self.leader.peers, key=lambda v: v.freshness)
                 new_leader = nrank[self.quorum - 1].id
+                if new_leader == self.leader.id:
+                    new_leader = nrank[-1].id
 
+            return [event.Event(None, event.Etype.LEAD, evt.t, new_leader)]
+        elif evt.type == event.Etype.FORK:
+            self.leader_fork = True
+            return self.handle_new_leader(event.Event(None, event.Etype.LEAD, evt.t, self.aid))
+        elif evt.type == event.Etype.BADVOTELEAD:
+            nrank = sorted(self.leader.peers, key=lambda v: v.freshness, reverse=True)
+            worst = len(nrank) - self.quorum
+            if self.nodes[self.aid].freshness <= nrank[worst + 1].freshness:
+                return [event.Event(None, event.Etype.BADVOTELEAD, evt.t + self.tx_retry)]
+            if nrank[worst + 1].has(nrank[worst].head):
+                return [event.Event(None, event.Etype.BADVOTELEAD, evt.t + self.tx_retry)]
+
+            new_leader = nrank[-self.quorum + 1].id
+            if new_leader == self.aid:
+                new_leader = nrank[-self.quorum + 2].id
+
+            self.nodes[self.aid].steal_from(self.nodes[new_leader])
+            if self.DEBUG:
+                self.nodes[self.aid].write_log(evt.t, f'casted a bad vote for {new_leader}')
+            self.bad_vote = True
+            print(new_leader, ', '.join(f'{i.name}: {i.freshness}/({i.head.t}, {i.head.h})' for i in nrank))
             return [event.Event(None, event.Etype.LEAD, evt.t, new_leader)]
         elif evt.type == event.Etype.LEAD:
             return self.handle_new_leader(evt)
@@ -255,18 +273,24 @@ class Network:
                         follower.write_log(
                             evt.t, f'{leader.name}-> {node.Block.strlist(blocks)} Replication needs more blocks')
                     return [event.Event(leader, event.Etype.R2, evt.t + self.delay(follower, leader), follower, follower.head.h)]
-            else:
-                if self.DEBUG:
-                    follower.write_log(evt.t, f'{leader.name}-> {node.Block.strlist(blocks)} Replication rejected')
-                return []
+            elif self.DEBUG:
+                if res == node.Rtype.REJ1:
+                    follower.write_log(
+                        evt.t, f'{leader.name}-> Rejected (block/head mismatch) {node.Block.strlist(blocks)}')
+                elif res == node.Rtype.REJ3:
+                    follower.write_log(
+                        evt.t, f'{leader.name}-> Rejected (bad chain) {node.Block.strlist(blocks)}')
+                elif res == node.Rtype.REJ2:
+                    follower.write_log(
+                        evt.t, f'{leader.name}-> Rejected (diff chain mismatch) {node.Block.strlist(blocks)}')
 
             return []
         elif evt.type == event.Etype.ACK:
-            if not self.is_leader(evt.subject):
-                return []
-
             follower, t, h, = evt.args
             fid = follower.id
+
+            if not self.is_leader(evt.subject) or t < evt.subject.term or not follower in evt.subject.listeners:
+                return []
 
             if self.DEBUG:
                 follower.write_log(evt.t, f'->{evt.subject.name} ACK term {t} and height {h}')
@@ -282,24 +306,27 @@ class Network:
 
             return []
         elif evt.type == event.Etype.R2:
-            if not self.is_leader(evt.subject):
-                return []
-
             follower, fh, = evt.args
             leader = evt.subject
+            if not self.is_leader(evt.subject) or not follower in leader.listeners:
+                return []
+
             blocks = leader.read_blocks_since(fh)
             if self.DEBUG:
                 follower.write_log(evt.t, f'->{leader.name} ask for more blocks from height {fh}')
                 leader.write_log(evt.t, f'{follower.name}-> send more blocks: {node.Block.strlist(blocks)}')
             return [event.Event(follower, event.Etype.REP, evt.t + self.delay(leader, follower), leader, leader.term, blocks)]
         elif evt.type == event.Etype.CMT:
-            t, h, cc = evt.args
+            leader, t, h, cc = evt.args
             follower = evt.subject
+            if not self.is_leader(leader) or not follower in leader.listeners:
+                return []
+
             res = follower.commit(t, h, cc)
             if self.DEBUG:
                 if res == node.Rtype.YES:
                     evt.subject.write_log(evt.t, f'Commit block {str(follower.head)}, CC = {cc}')
-                elif res == node.Rtype.REJ:
+                elif res == node.Rtype.REJ1:
                     evt.subject.write_log(evt.t, f'Refuse to commit block at term {t}, height {h}')
                 elif res == node.Rtype.NO:
                     evt.subject.write_log(evt.t, f'Block-to-commit is old at term {t}, height {h}')
@@ -320,55 +347,47 @@ class Network:
         global looping
         looping = True
 
-        def proceed(t):
-            global looping
+        t = 0
+        while t < maxtime:
+            for plan in plans:
+                planned = plan.events_until(t)
+                for evt in planned:
+                    heapq.heappush(events, evt)
 
-            if t + period < maxtime and looping:
-                if events or t < maxt_plans:
-                    threading.Timer(sleep, proceed, (t + period,)).start()
-                else:
-                    threading.Timer(0, proceed, (t + period,)).start()
+            # timer = defaultdict(float)
+            while events and events[0].t <= t:
+                event = heapq.heappop(events)
+                # t0 = time.time()
+                new_events = self.resolve(event)
+                # timer[event.type.name] += time.time() - t0
 
-            with lock:
                 try:
-                    for plan in plans:
-                        planned = plan.events_until(t)
-                        for evt in planned:
-                            heapq.heappush(events, evt)
-
-                    while events and events[0].t <= t:
-                        event = heapq.heappop(events)
-                        new_events = self.resolve(event)
-                        try:
-                            assert isinstance(new_events, list)
-                        except:
-                            print(event)
-                            raise
-
-                        for new_event in new_events:
-                            heapq.heappush(events, new_event)
-
-                        if self.DEBUG:
-                            ef.write(f'{str(event)}\n')
-
-                    if self.DEBUG:
-                        ef.flush()
-
-                    prog = f'{self.progress_commit[1]}||{Fore.LIGHTRED_EX}{self.adversarial_commit[1]}{Fore.LIGHTBLUE_EX}' if self.forking else f'{self.progress_commit[1]}'
-
-                    bar.set_description(f'{Fore.LIGHTBLUE_EX}[{node.ms_to_str(t)} @ {prog}]{Fore.RESET} ' +
-                                        ' '.join(self.brief(v) for v in self.nodes))
-                    bar.update()
-
-                    if t + period >= maxtime:
-                        looping = False
+                    assert isinstance(new_events, list)
                 except:
-                    looping = False
+                    print(event)
                     raise
 
-        proceed(0)
-        while looping:
-            time.sleep(1)
+                for new_event in new_events:
+                    heapq.heappush(events, new_event)
+
+                if self.DEBUG:
+                    ef.write(f'{str(event)}\n')
+
+            if self.DEBUG:
+                ef.flush()
+
+            # consumer = max(timer, key=lambda k: timer[k])
+
+            prog = f'{self.progress_commit[1]}||{Fore.LIGHTRED_EX}{self.adversarial_commit[1]}{Fore.LIGHTBLUE_EX}' if self.forking else f'{self.progress_commit[1]}'
+
+            bar.set_description(f'{Fore.LIGHTRED_EX if self.bad_vote else Fore.LIGHTBLUE_EX}' +
+                                f'[{node.ms_to_str(t)} @ {prog}]{Fore.RESET} ' +
+                                ' '.join(self.brief(v) for v in self.nodes))
+            bar.update()
+            t += period
+
+            if events or t < maxt_plans:
+                time.sleep(sleep)
 
         bar.close()
 
@@ -377,6 +396,9 @@ class Network:
 
         if self.adversary:
             self.adversary.flush_uncommitted()
+
+        if events:
+            print(f'Warning: {len(events)} events not processed')
 
         if self.DEBUG:
             ef.close()
@@ -394,8 +416,8 @@ class Network:
             s1, s2 = self.split_honest()
             id1, id2 = list(map(lambda x: x.id, s1)), list(map(lambda x: x.id, s2))
             self.leader = self.nodes[lid]
-            prep = [(self.leader, s1, term, id1, self.progress),
-                    (self.adversary, s2, term+1, id2, self.adversarial_progress)]
+            prep = [(self.leader, s1, term, [self.aid] + id1, self.progress),
+                    (self.adversary, s2, term, [self.aid] + id2, self.adversarial_progress)]
         else:
             lc, acc = self.make_lc(lid)
             if len(lc) < self.quorum:
@@ -410,6 +432,9 @@ class Network:
             if self.DEBUG:
                 leader.write_log(evt.t, f'Becoming leader of term {term}; accepting followers '
                                  f'{list(map(lambda x: x.id, acc))}, LC = {lc}')
+                for f in acc:
+                    f.write_log(evt.t, f'Accepting leader of term {term} {leader.name} '
+                                f'{list(map(lambda x: x.id, acc))}, LC = {lc}')
 
         return [event.Event(None, event.Etype.INFO, evt.t, "fork", id1, id2)] if to_fork else []
 
@@ -428,19 +453,28 @@ class Network:
         progress.update({f.id: (0, 0) for f in followers})
         progress[leader.id] = ft, fh
 
+        self.delay_mgr.rebase(leader.id)
+
         for v in followers:
             v.reset_leader_prog()
             v.update_term(term)
 
     def brief(self, v: node.Node):
-        p = f'{v.tail.h}/{v.head.h}'
         if v == self.leader:
+            p = f'{v.tail.h}/{v.head.h}'
             if self.forking:
                 pa = f'{self.adversary.tail.h}/{self.adversary.head.h}'
                 return f'{Fore.YELLOW}{p}{Fore.RESET}||{Fore.RED}{pa}{Fore.RESET}'
             else:
                 return f'{Fore.YELLOW}{p}{Fore.RESET}'
-        elif self.forking and v in self.adversary.listeners:
-            return f'{Fore.LIGHTRED_EX}{p}{Fore.RESET}'
-        else:
+        elif self.leader.id < 0:
             return p
+        else:
+            if self.forking and v in self.adversary.listeners:
+                d1, d2 = (v.tail.h - self.adversary.tail.h), (v.head.h - self.adversary.head.h)
+                q = f'{d1 if d1 < 0 else "+" + str(d1):>3}/{d2 if d2 < 0 else "+" + str(d2):<3}'
+                return f'{Fore.LIGHTRED_EX}{q}{Fore.RESET}'
+            else:
+                d1, d2 = (v.tail.h - self.leader.tail.h), (v.head.h - self.leader.head.h)
+                q = f'{d1 if d1 < 0 else "+" + str(d1):>3}/{d2 if d2 < 0 else "+" + str(d2):<3}'
+                return q if v in self.leader.listeners else f'{Fore.LIGHTRED_EX}{q}{Fore.RESET}'
