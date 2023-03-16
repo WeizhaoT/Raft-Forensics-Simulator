@@ -3,6 +3,7 @@ import json
 import os
 import io
 import shutil
+import hashlib
 import numpy as np
 from os.path import join
 from typing import List, Dict, Callable, Set
@@ -11,12 +12,28 @@ from enum import Enum
 from file_read_backwards import FileReadBackwards
 
 
+CACHESIZE = 600
+
 FILESIZES = {
     'blockchain': 10000,
     'leader': -1,
     'log': 1000,
     'uncommitted': -1
 }
+
+
+def get_edge_block(path, last=False):
+    fp = FileReadBackwards(path) if last else open(path, 'r')
+
+    while True:
+        line = fp.readline()
+        if line.isspace():
+            continue
+        if len(line) > 0:
+            fp.close()
+            return Block.fromjson(line)
+        else:
+            raise EOFError
 
 
 def fmt_int(i, imax, zero=True):
@@ -43,23 +60,22 @@ def readline_non_empty(f: io.TextIOWrapper) -> str:
 
 
 class Rtype(Enum):
-    REJ = -1
+    REJ3 = -3
+    REJ2 = -2
+    REJ1 = -1
     NO = 0
     KEEP = 1
     YES = 2
 
 
 class Block:
+    INT_BYTES = 8
+
     def __init__(self, t, h, pt, tx=''):
         self.t = t
         self.h = h
         self.pt = pt
         self.tx = tx
-
-    @staticmethod
-    def fromjson(jsonstr: str):
-        obj = json.loads(jsonstr)
-        return Block(obj['t'], obj['h'], obj['pt'], obj['tx'])
 
     def __str__(self):
         return f'{self.t}-{self.h}({self.pt})'
@@ -85,13 +101,40 @@ class Block:
     def __add__(self, h: int):
         return Block(self.t, self.h + h, -1, -1, '')
 
-    def follows(self, block):
+    def to_bytearray(self):
+        return int.to_bytes(self.t, Block.INT_BYTES, 'big') + \
+            int.to_bytes(self.h, Block.INT_BYTES, 'big') + \
+            int.to_bytes(self.pt, Block.INT_BYTES, 'big', signed=True) + \
+            bytearray(self.tx, 'utf-8')
+
+    def follows(self, block, check_hash=False):
+        if check_hash:
+            hash = hashlib.sha256()
+            hash.update(block.to_bytearray())
+            digest = bytearray(hash.digest())
+            digest2 = digest.copy()
+            return digest == digest2 and self.pt == block.t
+
         return self.pt == block.t
 
     @staticmethod
-    def strlist(blocks: List[Block]):
+    def fromjson(jsonstr: str):
+        obj = json.loads(jsonstr)
+        return Block(obj['t'], obj['h'], obj['pt'], obj['tx'])
+
+    def frombytearray(b: bytearray):
+        t = int.from_bytes(b[:Block.INT_BYTES])
+        h = int.from_bytes(b[Block.INT_BYTES:2*Block.INT_BYTES])
+        pt = int.from_bytes(b[2*Block.INT_BYTES:3*Block.INT_BYTES], signed=True)
+        tx = b[3*Block.INT_BYTES:].decode()
+        return Block(t, h, pt, tx)
+
+    @staticmethod
+    def strlist(blocks: List[Block], full=False):
         if len(blocks) == 0:
             return '[]'
+        if full:
+            return '[' + ', '.join(f'"{str(block)}"' for block in blocks) + ']'
 
         block_strs, term, last_h = [], -1, -1
         for j, block in enumerate(blocks + [Block(blocks[-1].t+1, blocks[-1].h+1, 0)]):
@@ -119,10 +162,10 @@ class Node:
 
         self.term: int = 0
 
+        self.cache: List[Block] = []
         self.blocks: List[Block] = [Block(0, 0, -1, '')]
 
         self.cc: List[int] = []
-        self.lc: Dict[int, int] = {}
 
         self.listeners: Set[Node] = set([])
 
@@ -261,8 +304,7 @@ class Node:
         self.listeners.remove(node)
 
     def accept_leader(self, term: int, fresh_term: int, fresh_height: int, leader_id: int, lc: List[int]):
-        assert term not in self.lc
-        self.lc[term] = {'l': leader_id, 'ft': fresh_term, 'fh': fresh_height, 'lc': lc}
+        assert term > self.term or leader_id == self.id
         self.write_items('leader', json.dumps({'t': term, 'ft': fresh_term,
                          'fh': fresh_height, 'leader': leader_id, 'voters': lc}))
 
@@ -289,13 +331,13 @@ class Node:
             raise ValueError(f'Head {self.head.h} is greater than {blocks[-1].h}')
 
         if 0 <= i_comm and self.head != blocks[i_comm]:
-            return Rtype.REJ
+            return Rtype.REJ1
 
         i_ow_input, i_ow_output = -1, -1
         for i, block in enumerate(blocks):
             # check chain
             if i > 0 and not block.follows(blocks[i-1]):
-                return Rtype.NO
+                return Rtype.REJ3
 
             i_local = i - i_comm
             # skip when breaking point already set, or no corresponding local position
@@ -304,7 +346,7 @@ class Node:
             #
             if (i_local >= len(self.blocks) or self.blocks[i_local] != block):
                 if i_local > 0 and not block.follows(self.blocks[i_local-1]):
-                    return Rtype.REJ
+                    return Rtype.REJ2
                 i_ow_input, i_ow_output = i, i_local
 
         if i_comm < -len(self.blocks):
@@ -318,30 +360,31 @@ class Node:
     def read_blocks_since(self, h_start):
         if h_start >= self.head.h:
             return self.blocks[h_start-self.head.h:]
+        elif self.cache and h_start >= self.cache[0].h:
+            return self.cache[h_start-self.cache[0].h:] + self.blocks
 
         files = [join(self.dir, f) for f in os.listdir(self.dir) if os.path.isfile(
             join(self.dir, f)) and f.startswith(f'blockchain_{self.name}') and f.endswith('.jsonl')]
 
         files = sorted(files)
-        blocks = {}
+        blocks, last_h = [], h_start
         for filename in files:
+            last = get_edge_block(filename, last=True)
+            if last.h < h_start:
+                continue
+
             with open(filename, 'r') as f:
                 for line in f.readlines():
                     if not line.isspace():
                         block = Block.fromjson(line)
-                        if block.h > h_start:
-                            blocks[block.h] = block
+                        if block.h == last_h + 1:
+                            blocks.append(block)
+                            last_h += 1
 
-        i, block_list = h_start+1, []
-        while i in blocks:
-            block_list.append(blocks[i])
-            del blocks[i]
-            i += 1
+        if not blocks or blocks[-1].h != self.head.h:
+            raise ValueError(f'Corrupt block data: block {block[-1].h + 1} missing')
 
-        if len(blocks) > 0:
-            raise ValueError(f'Corrupt block data: block {i} missing')
-
-        return block_list + self.blocks[1:]
+        return blocks + self.blocks[1:]
 
     def has(self, block: Block) -> bool:
         if self.tail.t < block.t or self.tail.h < block.h:
@@ -411,7 +454,7 @@ class Node:
             return Rtype.NO
 
         if self.blocks[i].t != t or not self.validate_cc(self.blocks[i], cc):
-            return Rtype.REJ
+            return Rtype.REJ1
 
         self.cc = cc
 
@@ -419,13 +462,18 @@ class Node:
             json.dump({'t': t, 'h': h, 'voters': cc}, f)
 
         self.write_items('blockchain', self.blocks[1:i+1], lambda b: b.to_json())
+        if i >= CACHESIZE:
+            self.cache = self.blocks[i-CACHESIZE:i]
+        else:
+            self.cache = self.cache[max(0, len(self.cache) + i - CACHESIZE):] + self.blocks[:i]
+
         self.blocks = self.blocks[i:]
         return Rtype.YES
 
     def steal_from(self, node: Node):
+        self.cache = deepcopy(node.cache)
         self.blocks = deepcopy(node.blocks)
         self.cc = deepcopy(node.cc)
-        self.lc = deepcopy(node.lc)
         self.filecount = deepcopy(node.filecount)
         self.linequota = deepcopy(node.linequota)
 
