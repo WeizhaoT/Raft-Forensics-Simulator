@@ -24,6 +24,7 @@ class Network:
         tx_retry_time: int,
         datadir: str,
         debug: bool,
+        uncommitted_file: bool = False,
         adversary: None | int = None
     ) -> None:
         assert n > 1
@@ -43,7 +44,8 @@ class Network:
         self.delay_mgr = delay_mgr
         self.leader: node.Node = None
         self.dummy = node.Node(-1, n)
-        self.nodes: List[node.Node] = [node.Node(id_=i, n=n, dir_=nodedir(i)) for i in range(n)]
+        self.nodes: List[node.Node] = [node.Node(id_=i, n=n, dir_=nodedir(
+            i), write_uncommitted=uncommitted_file) for i in range(n)]
         self.quorum = len(self.nodes) // 2 + 1
 
         self.aid = -1
@@ -58,7 +60,8 @@ class Network:
         if adversary is not None:
             os.makedirs(nodedir(adversary, True))
             self.aid = adversary
-            self.adversary = node.Node(id_=adversary, n=n, dir_=nodedir(adversary, True), adversarial=True)
+            self.adversary = node.Node(id_=adversary, n=n, dir_=nodedir(adversary, True),
+                                       adversarial=True, write_uncommitted=uncommitted_file)
             self.adversarial_progress = {i: (0, 0) for i in range(n)}
             self.adversarial_commit = (0, 0)
         else:

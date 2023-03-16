@@ -24,6 +24,7 @@ if __name__ == '__main__':
     parser.add_argument('-d', '--debug', action='store_true', help='debug')
     parser.add_argument('--fork', action='store_true')
     parser.add_argument('--bvote', action='store_true')
+    parser.add_argument('--write-uc', action='store_true')
 
     args = parser.parse_args()
 
@@ -72,5 +73,6 @@ if __name__ == '__main__':
         args.maxtime = int(max(max([e.t for e in events]), args.transactions * args.tx_interval) * 1.1) + 10000
 
     # datadir = 'logs'
-    net = Network(n, delay, tx_retry_time=10 * args.tx_interval, datadir=datadir, adversary=4, debug=args.debug)
+    net = Network(n, delay, tx_retry_time=10 * args.tx_interval, datadir=datadir,
+                  adversary=4, debug=args.debug, uncommitted_file=args.write_uc)
     net.run(args.period, args.maxtime, events, plans, sleep=args.wait)

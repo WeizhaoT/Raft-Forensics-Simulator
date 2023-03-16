@@ -155,7 +155,7 @@ class Block:
 
 
 class Node:
-    def __init__(self, id_, n, adversarial=False, dir_='logs') -> None:
+    def __init__(self, id_, n, adversarial=False, dir_='logs', write_uncommitted=False) -> None:
         self.id: int = id_
         self.n: int = n
         self.adversarial: bool = adversarial
@@ -171,6 +171,8 @@ class Node:
 
         self.asked = -1
         self.acked = -1
+
+        self.write_uncommitted = write_uncommitted
 
         self.linequota: Dict[str, int] = deepcopy(FILESIZES)
         self.filecount: Dict[str, int] = {p: 0 for p in FILESIZES}
@@ -354,6 +356,8 @@ class Node:
 
         if i_ow_input >= 0:
             self.blocks = self.blocks[:i_ow_output] + blocks[i_ow_input:]
+            if self.write_uncommitted:
+                self.flush_uncommitted()
 
         return Rtype.YES
 
@@ -468,6 +472,8 @@ class Node:
             self.cache = self.cache[max(0, len(self.cache) + i - CACHESIZE):] + self.blocks[:i]
 
         self.blocks = self.blocks[i:]
+        if self.write_uncommitted:
+            self.flush_uncommitted()
         return Rtype.YES
 
     def steal_from(self, node: Node):
