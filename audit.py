@@ -2,19 +2,26 @@ from __future__ import annotations
 
 import time
 import os
+import sys
 import json
 import hashlib
 import ecdsa
 import argparse
 import flatten_dict
 
+from colorama import Fore
 from tqdm import tqdm
 from collections import defaultdict
 from os.path import join, isdir
-from typing import List, Tuple, Set
+from typing import List, Tuple, Dict, Callable
 from file_read_backwards import FileReadBackwards
 
 import node
+
+MIN_PYTHON = (3, 9)
+if sys.version_info < MIN_PYTHON:
+    sys.exit("Python %s.%s or later is required.\n" % MIN_PYTHON)
+
 
 HASH = hashlib.sha256()
 SECKEY = ecdsa.SigningKey.generate(curve=ecdsa.NIST256p, entropy=ecdsa.util.PRNG(b'srf'))
@@ -28,7 +35,146 @@ SIG = SECKEY.sign(MSG, entropy=ecdsa.util.PRNG(b'sgg'), hashfunc=hashlib.sha256)
 FUNC_TIMER = defaultdict(float)
 
 
-def is_valid_int(k, n):
+def get_edge_block(path, last=False):
+    fp = FileReadBackwards(path) if last else open(path, 'r')
+
+    while True:
+        line = fp.readline()
+        if line.isspace():
+            continue
+        if len(line) > 0:
+            fp.close()
+            return node.Block.fromjson(line)
+        else:
+            raise EOFError
+
+
+def binary_search(left, right, left_predicate: Callable[[int], bool]):
+    if left > right:
+        raise ValueError(f'left {left} larger than right {right}')
+    else:
+        while left + 1 < right:
+            m = (left + right) // 2
+            if left_predicate(m):
+                right = m
+            else:
+                left = m
+
+        return left, right
+
+
+class NodeInfo:
+    def __init__(self, id_: int, cc: dict, lc: dict, max_file: int, chunk: Callable[[int], str]) -> None:
+        self.id = id_
+        self.cc = cc
+        self.lc = lc
+        self.max_file = max_file
+        self.chunk = chunk
+
+        self.last_block = None
+        while self.max_file >= 0:
+            try:
+                self.last_block = get_edge_block(chunk(self.max_file), last=True)
+                break
+            except EOFError:
+                os.remove(chunk(self.max_file))
+                self.max_file -= 1
+
+        if self.last_block is None:
+            raise ValueError(f'Cannot find any block for node {id_}')
+        if self.last_block.h != self.cc['h']:
+            raise ValueError(f'Last on-chain block {self.last_block} / CC height {cc["h"]} mismatch for node {id_}')
+
+        self.fp = None
+        self.chunk_last_blocks = {self.max_file: self.last_block}
+        self.chunk_first_blocks = {0: node.Block(0, 0, -1)}
+
+    def __getitem__(self, k):
+        if not isinstance(k, int) or not 0 <= k <= self.max_file:
+            raise ValueError(f'No chunk {k} exists for node {self.id} (max {self.max_file})')
+        return self.chunk(k)
+
+    @property
+    def length(self) -> int:
+        return self.cc['h']
+
+    @property
+    def final_term(self) -> int:
+        return self.cc['t']
+
+    @property
+    def cc_voter(self) -> List[int]:
+        return self.cc['voters']
+
+    def lc_voter(self, term: int) -> List[int]:
+        return self.lc[term]['voters']
+
+    def leader_of(self, term: int):
+        return self.lc[term]['leader']
+
+    def first_block_in_chunk(self, k: int):
+        if k in self.chunk_first_blocks:
+            return self.chunk_first_blocks[k]
+        else:
+            self.chunk_first_blocks[k] = get_edge_block(self[k], last=False)
+            return self.chunk_first_blocks[k]
+
+    def last_block_in_chunk(self, k: int):
+        if k in self.chunk_last_blocks:
+            return self.chunk_last_blocks[k]
+        else:
+            self.chunk_last_blocks[k] = get_edge_block(self[k], last=True)
+            return self.chunk_last_blocks[k]
+
+    def find_file_range_by_term(self, term: int) -> Tuple[int, int]:
+        if term <= 0 or term > self.last_block.t:
+            raise ValueError(f'Target term {term} out of range {self.last_block.t}')
+
+        if self.max_file == 0:
+            return 0, 0
+
+        first_r = self.first_block_in_chunk(self.max_file)
+        if first_r.t < term:
+            return self.max_file, self.max_file
+
+        last_l = self.last_block_in_chunk(0)
+        if last_l.t > term:
+            return 0, 0
+
+        # Find k1, first file chunk that includes first block in "term"
+        if term == 1:
+            k1 = 0
+        else:
+            l_, r_ = binary_search(0, self.max_file,
+                                   lambda x: self.first_block_in_chunk(x).t >= term)
+            last_l = self.last_block_in_chunk(l_)
+            k1 = r_ if last_l.t < term else l_
+
+        # Find k2, first file chunk that includes first block with t > "term"
+        if term == self.last_block.t:
+            k2 = self.max_file
+        else:
+            _, k2 = binary_search(0, self.max_file,
+                                  lambda x: self.last_block_in_chunk(x).t > term)
+
+        assert k1 <= k2
+        return k1, k2
+
+    def open(self, k: int):
+        self.fp = open(self[k], 'r')
+
+    def close(self):
+        if self.fp:
+            self.fp.close()
+
+    def read_block(self):
+        try:
+            return node.Block.fromjson(node.readline_non_empty(self.fp))
+        except EOFError:
+            return None
+
+
+def is_valid_int(k, n=0):
     if n > 0:
         return isinstance(k, int) and 0 <= k < n
     else:
@@ -48,100 +194,20 @@ def check_sig(pubkey: ecdsa.VerifyingKey = PUBKEY, sig: bytes = SIG, msg: bytes 
     return res
 
 
-def get_edge_block(path, last=False):
-    fp = FileReadBackwards(path) if last else open(path, 'r')
-
-    while True:
-        line = fp.readline()
-        if line.isspace():
-            continue
-        if len(line) > 0:
-            fp.close()
-            return node.Block.fromjson(line)
-        else:
-            raise EOFError
-
-
-def read_all_blocks(path):
-    blocks = []
-    with open(path, 'r') as f:
+def find_matching_height(path: str, target: node.Block) -> node.Block:
+    with FileReadBackwards(path) as fp:
         while True:
-            line = f.readline()
+            line = fp.readline()
             if line.isspace():
                 continue
-            if len(line) > 0:
-                blocks.append(node.Block.fromjson(line))
-            else:
-                return blocks
-
-
-def get_file_size(path):
-    size = 0
-    with open(path, 'r') as f:
-        while True:
-            line = f.readline()
-            if line.isspace():
-                continue
-            if len(line) > 0:
-                size += 1
-            else:
-                return size
-
-
-def find_file_range_by_term(term, k1_init, k2_init, f) -> Tuple[int, int]:
-    k2 = k2_init
-    last = get_edge_block(f(k2), last=True)
-
-    # Find first file k2 of Node-High whose final block has a higher term
-    while True:
-        if last.t > term:
-            if k2 == 0:
+            if len(line) == 0:
                 break
-            else:
-                last = get_edge_block(f(k2-1), last=True)
-                if last.t > term:
-                    k2 -= 1
-                    continue
-                else:
-                    break
-        else:
-            k2 += 1
-            last = get_edge_block(f(k2), last=True)
-            if last.t > term:
-                break
-            else:
-                continue
 
-    k1 = min(k1_init, k2)
-    first = get_edge_block(f(k1), last=False)
-    # Find first file k1 of Node-High which includes first block with a non-lower term
-    while True:
-        if first.t < term:
-            if k1 == k2:
-                break
-            else:
-                first = get_edge_block(f(k1+1), last=False)
-                if first.t < term:
-                    k1 += 1
-                    continue
-                else:
-                    break
-        else:
-            if k1 == 0:
-                break
-            else:
-                k1 -= 1
-                first = get_edge_block(f(k1), last=False)
-                if first.t < term:
-                    break
-                else:
-                    continue
+            block = node.Block.fromjson(line)
+            if block.h == target.h:
+                return block
 
-    last = get_edge_block(f(k1), last=True)
-    if last.t < term:
-        k1 += 1
-
-    return k1, k2
+    raise ValueError(f'Fail to find a block with matching height ({target})')
 
 
 def check_node_integrity(dir_, name, n) -> Tuple[bool, int, dict, dict, dict]:
@@ -155,7 +221,7 @@ def check_node_integrity(dir_, name, n) -> Tuple[bool, int, dict, dict, dict]:
             prefix, postfix = f'blockchain_{name}_', '.jsonl'
             assert file.startswith(prefix) and file.endswith(postfix)
             num = int(file[len(prefix):-len(postfix)])
-            if not is_valid_int(num, -1):
+            if not is_valid_int(num):
                 raise ValueError(f'Illegal blockchain file number {num} in {dir_}')
 
             max_num += 1
@@ -202,7 +268,7 @@ def check_node_integrity(dir_, name, n) -> Tuple[bool, int, dict, dict, dict]:
             if cc is None:
                 with open(join(dir_, file), 'r') as f:
                     cc = json.load(f)
-                    if not is_valid_int(cc['t'], -1) or not is_valid_int(cc['h'], -1):
+                    if not is_valid_int(cc['t']) or not is_valid_int(cc['h']):
                         raise ValueError(f'Invalid CC term/height in dir {dir_}')
                     if len(set(cc['voters'])) != len(cc['voters']):
                         raise ValueError(f'Duplicate voter in CC {entry["voters"]} of term {term} in dir {dir_}')
@@ -260,158 +326,138 @@ def check_node_integrity(dir_, name, n) -> Tuple[bool, int, dict, dict, dict]:
     return True, max_num, cc, lc_list, timer
 
 
-def pair_consistency_check(i, j, fi, fj, maxc):
-    ci, cj = maxc[i], maxc[j]
-
+def pair_consistency_check(ni: NodeInfo, nj: NodeInfo):
     timer = {}
     start = time.time()
-    consistency = None
+    conflict = False
 
-    if ci != cj:
-        f, c, fo, _ = (fi, ci, fj, cj) if ci < cj else (fj, cj, fi, ci)
-        last = None
-        while True:
-            try:
-                last = get_edge_block(f(c), last=True)
-                break
-            except EOFError:
-                os.remove(f(c))
-                c -= 1
-                if ci < cj:
-                    maxc[i] = c
-                else:
-                    maxc[j] = c
-
-        assert last is not None
-
-        with FileReadBackwards(fo(c)) as fp:
-            while True:
-                line = fp.readline()
-                if line.isspace():
-                    continue
-                if len(line) == 0:
-                    raise ValueError(f'Fail to find a block with matching height ({last.to_json()})')
-
-                block = node.Block.fromjson(line)
-                if block.h == last.h:
-                    consistency = block == last
-                    break
+    if ni.max_file != nj.max_file:
+        nl, nh = (ni, nj) if ni.max_file < nj.max_file else (nj, ni)
+        conflict = nl.last_block != find_matching_height(nh[nl.max_file], nl.last_block)
     else:
-        lasti, lastj = None, None
-        while True:
-            try:
-                lasti = get_edge_block(fi(ci), last=True)
-                break
-            except EOFError:
-                os.remove(fi(ci))
-                ci -= 1
-                maxc[i] = ci
-
-        while True:
-            try:
-                lastj = get_edge_block(fj(cj), last=True)
-                break
-            except EOFError:
-                os.remove(fj(cj))
-                cj -= 1
-                maxc[j] = cj
-
-        assert lasti is not None and lastj is not None
-        if lasti.h == lastj.h:
-            consistency = lasti == lastj
+        if ni.length == nj.length:
+            conflict = ni.last_block != nj.last_block
         else:
-            fo, c, last = (fj, ci, lasti) if lasti.h < lastj.h else (fi, cj, lastj)
+            nl, nh = (ni, nj) if ni.length < nj.length else (nj, ni)
+            conflict = nl.last_block != find_matching_height(nh[nl.max_file], nl.last_block)
 
-            with FileReadBackwards(fo(c)) as fp:
-                while True:
-                    line = fp.readline()
-                    if line.isspace():
-                        continue
-                    if len(line) == 0:
-                        raise ValueError(f'Fail to find a block with matching height ({last.to_json()})')
-
-                    block = node.Block.fromjson(line)
-                    if block.h == last.h:
-                        consistency = block == last
-                        break
-
-    assert consistency is not None
     timer[('validate', 'pair consistency')] = time.time() - start
-    return consistency, timer
+    return conflict, timer
 
 
-def pair_find_adversary(size, fi, fj, ci, cj, cci, ccj, lci, lcj):
+def pair_find_forking_point(ni: NodeInfo, nj: NodeInfo, return_blocks=False) -> Tuple:
+    max_file = min(ni.max_file, nj.max_file)
+    if ni.last_block_in_chunk(0) != nj.last_block_in_chunk(0):
+        forking_file = 0
+    elif ni.first_block_in_chunk(max_file) == nj.first_block_in_chunk(max_file):
+        forking_file = max_file
+    elif max_file > 0 and ni.last_block_in_chunk(max_file - 1) == nj.last_block_in_chunk(max_file - 1):
+        if return_blocks:
+            bi, bj = ni.first_block_in_chunk(max_file), nj.first_block_in_chunk(max_file)
+            return bi.h, (bi, bj)
+        else:
+            return ni.first_block_in_chunk(max_file).h
+    else:
+        _, forking_file = binary_search(0, max_file, lambda x: ni.last_block_in_chunk(x) != nj.last_block_in_chunk(x))
+
+    ni.open(forking_file)
+    nj.open(forking_file)
+
+    while True:
+        bi, bj = ni.read_block(), nj.read_block()
+        assert bi is not None and bj is not None
+        if bi != bj:
+            return (bi.h,) + (((bi, bj),) if return_blocks else ())
+
+
+def pair_find_adversary(ni: NodeInfo, nj: NodeInfo, return_evidence=False) -> Tuple:
     timer = {}
     start = time.time()
-    if cci['t'] == ccj['t']:
-        timer[('find', )] = time.time() - start
-        return [lci[cci['t']]['leader']], timer
-
-    fl, fh, cl, ch, ccl, cch, lcl, lch = (fi, fj, ci, cj, cci, ccj, lci, lcj) if cci['t'] < ccj['t'] else \
-        (fj, fi, cj, ci, ccj, cci, lcj, lci)
-
-    term, kl = min(cci['t'], ccj['t']), ccl['h'] // size
-
-    # Locate first block of term owned by Node-Low
-    while True:
-        first = get_edge_block(fl(kl))
-        if first.t >= term and kl > 0:
-            kl -= 1
-            continue
+    if ni.final_term == nj.final_term:
+        if not return_evidence:
+            timer[('find', )] = time.time() - start
+            return ([ni.leader_of(ni.final_term)], timer)
         else:
-            break
+            nl, nh = (ni, nj) if ni.length < nj.length else (nj, ni)
+            bh = find_matching_height(nh[nl.max_file], nl.last_block)
+            timer[('find', )] = time.time() - start
+            return ([ni.leader_of(ni.final_term)], timer, (nl.last_block, bh))
 
-    if first.t < term:
-        last = get_edge_block(fl(kl), last=True)
-        if last.t < term:
-            kl += 1
+    nl, nh = (ni, nj) if ni.final_term < nj.final_term else (nj, ni)
+    term = nl.final_term
 
-    kh1, kh2 = find_file_range_by_term(term, min(kl, ch), min(kl, ch), fh)
+    kl, _ = nl.find_file_range_by_term(term)
+    kh1, kh2 = nh.find_file_range_by_term(term)
 
-    assert kh2 >= kh1
-    next_term = -1
+    next_term, first_h = -1, None
     for k in range(kh1, kh2+1):
-        blocks_h: List[node.Block] = read_all_blocks(fh(k))
-        if kl <= k <= cl:
-            blocks_l: List[node.Block] = read_all_blocks(fl(k))
-            for bh, bl in zip(blocks_h, blocks_l):
-                assert bh.h == bl.h
-                if bh.t == bl.t:
-                    if bh != bl:
-                        timer[('find', )] = time.time() - start
-                        return [lch[term]['leader']], timer
-                elif bh.t < bl.t:
-                    continue
-                else:
+        nh.open(k)
+
+        # LoNode has overlap in term with HiNode
+        if kl <= k <= nl.max_file:
+            nl.open(k)
+
+            while True:
+                bl = nl.read_block()
+                if bl is None:
+                    break
+
+                bh = nh.read_block()
+                assert bh and bh.h == bl.h
+                if bh.t > term:
                     next_term = bh.t
                     break
+                elif bh.t == term:
+                    if bh != bl:
+                        nh.close()
+                        nl.close()
+                        timer[('find', )] = time.time() - start
+                        return ([nh.leader_of(term)], timer) + (((bl, bh),) if return_evidence else ())
+                    elif first_h is None:
+                        first_h = bh
+                else:
+                    assert bl.t < term
 
+            nl.close()
             if next_term != -1:
                 break
 
-            assert len(blocks_h) >= len(blocks_l)
-            blocks_h = blocks_h[len(blocks_l) + 1:]
+        # Read blocks that LoNode misses
+        while True:
+            bh = nh.read_block()
+            if bh is None:
+                break
 
-        if len(blocks_h) == 0 or blocks_h[-1].t <= term:
-            continue
+            if bh.t > term:
+                next_term = bh.t
+                break
+            elif bh.t == term and first_h is None:
+                if return_evidence:
+                    nl.open(kl)
+                    while True:
+                        bl = nl.read_block()
+                        if bl is None:
+                            break
+                        if bl.t == term:
+                            nl.close()
+                            nh.close()
+                            timer[('find', )] = time.time() - start
+                            return ([nh.leader_of(term)], timer, (bl, bh))
+                    assert False
+                else:
+                    nh.close()
+                    timer[('find', )] = time.time() - start
+                    return ([nh.leader_of(term)], timer)
 
-        if blocks_h[0].t > term:
-            next_term = blocks_h[0].t
-        else:
-            for b in (blocks_h[1:]):
-                if b.t > term:
-                    next_term = b.t
-                    break
-        break
+        nh.close()
+        if next_term != -1:
+            break
 
     assert next_term != -1
-    LC = set(lch[next_term]['voters'])
-    CC = set(ccl['voters'])
-    adv = list(CC.intersection(LC))
+    adv = list(set(nh.lc_voter(next_term)).intersection(nl.cc_voter))
     assert len(adv) > 0
-
     timer[('find', )] = time.time() - start
-    return adv, timer
+    return (adv, timer) + (((nl.cc, {'t': next_term} | nh.lc[next_term]),) if return_evidence else ())
 
 
 def audit_raft_logs(path: str, n: int):
@@ -419,42 +465,42 @@ def audit_raft_logs(path: str, n: int):
         return lambda c: join(path, f'{node.fmt_int(i, n-1)}', f'blockchain_{node.fmt_int(i, n-1)}_{node.fmt_int(c, maxc[i])}.jsonl')
 
     meta_timer = defaultdict(float)
+    maxc = {}
 
-    ccs, lcs, maxc, filesize, fs_measure = {}, {}, {}, -1, True
     checked, adversarial = set([]), set([])
+
+    nodeinfos: List[NodeInfo] = [None] * n
     for i in range(n):
         dir_ = join(path, node.fmt_int(i, n-1))
         good, nc, cc, lc, timer = check_node_integrity(dir_, node.fmt_int(i, n-1), n)
         for key in timer:
             meta_timer[key] += timer[key]
-        ccs[i] = cc
-        lcs[i] = lc
+
         maxc[i] = nc
 
         if good:
             checked.add(i)
-            if fs_measure:
-                if nc >= 3:
-                    filesize = get_file_size(chain_file_func(i)(0))
-                    fs_measure = False
-                else:
-                    filesize = max(filesize, get_file_size(chain_file_func(i)(0)))
+            nodeinfos[i] = NodeInfo(i, cc, lc, nc, chain_file_func(i))
         else:
             adversarial.add(i)
 
-    print(checked)
+    if adversarial:
+        print(f'{Fore.LIGHTRED_EX}Warning: nodes {adversarial} failed integrity checks{Fore.RESET}')
+
     for i in checked:
         for j in checked:
             if i >= j:
                 continue
-            consistency, timer = pair_consistency_check(i, j, chain_file_func(i), chain_file_func(j), maxc)
+            conflict, timer = pair_consistency_check(nodeinfos[i], nodeinfos[j])
 
             for key in timer:
                 meta_timer[key] += timer[key]
 
-            if not consistency:
-                adv, timer = pair_find_adversary(filesize, chain_file_func(i), chain_file_func(
-                    j), maxc[i], maxc[j], ccs[i], ccs[j], lcs[i], lcs[j])
+            if conflict:
+                h, (bi, bj) = pair_find_forking_point(nodeinfos[i], nodeinfos[j], return_blocks=True)
+                adv, timer, evidence = pair_find_adversary(nodeinfos[i], nodeinfos[j], return_evidence=True)
+                print(i, j, bi, bj, *[e for e in evidence])
+
                 adversarial.update(adv)
                 for key in timer:
                     meta_timer[key] += timer[key]
