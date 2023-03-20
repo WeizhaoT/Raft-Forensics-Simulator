@@ -557,6 +557,7 @@ def audit_raft_logs(path: str, n: int):
     meta_timer.update(FUNC_TIMER)
     meta_timer = flatten_dict.unflatten(dict(meta_timer))
     meta_timer['adv'] = list(adversarial)
+    meta_timer['evidence'] = evidence
     with open(join(path, 'audit.json'), 'w') as f:
         json.dump(meta_timer, f, indent=4)
 
