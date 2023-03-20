@@ -95,7 +95,7 @@ if __name__ == "__main__":
 
     EXP = args.exp
 
-    n = 4
+    n = 5
     synchronizers = [Synchronizer(i) for i in range(n)]
     clear_conflict()
     clear_text()
