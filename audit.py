@@ -210,13 +210,18 @@ def find_matching_height(path: str, target: node.Block) -> node.Block:
     raise ValueError(f'Fail to find a block with matching height ({target})')
 
 
-def check_node_integrity(dir_, name, n) -> Tuple[bool, int, dict, dict, dict]:
+def check_node_integrity(dir_, name, n, bar: tqdm = None) -> Tuple[bool, int, dict, dict, dict]:
     cc, lc_list = None, {}
 
     timer = defaultdict(float)
 
     non_chain_files, max_num = [], -1
-    for file in sorted(os.listdir(dir_)):
+    dirs = os.listdir(dir_)
+    if bar is not None:
+        bar.set_description(f'({name}/{n}) Picking files')
+        bar.refresh()
+
+    for file in sorted(dirs):
         if file.startswith('blockchain'):
             prefix, postfix = f'blockchain_{name}_', '.jsonl'
             assert file.startswith(prefix) and file.endswith(postfix)
@@ -229,6 +234,10 @@ def check_node_integrity(dir_, name, n) -> Tuple[bool, int, dict, dict, dict]:
                 raise ValueError(f'Unexpected blockchain file number {num} (expecting {max_num}) in {dir_}')
         else:
             non_chain_files.append(file)
+
+    if bar is not None:
+        bar.set_description(f'({name}/{n}) Analyzing LC and CC')
+        bar.refresh()
 
     for file in non_chain_files:
         if file.startswith('leader'):
@@ -286,7 +295,10 @@ def check_node_integrity(dir_, name, n) -> Tuple[bool, int, dict, dict, dict]:
             timer[('load', 'commitment')] += time.time() - start
 
     predecessor, current = None, None
-    bar = tqdm(desc=f'Verifying blockchain data', total=cc['h'] + 1)
+    if bar is not None:
+        bar.total = cc['h'] + 1 if bar.total is None else bar.total + cc['h'] + 1
+        bar.set_description(f'({name}/{n}) Verifying blockchain data')
+        bar.refresh()
 
     start = time.time()
     for i in range(max_num + 1):
@@ -312,17 +324,18 @@ def check_node_integrity(dir_, name, n) -> Tuple[bool, int, dict, dict, dict]:
                 if predicate:
                     chain_total = time.time() - start
                     timer[('load', 'chain')] += chain_total - timer[('validate', 'chain')]
-                    bar.set_description(f'Blockchain corrupt')
-                    bar.close()
+                    if bar is not None:
+                        bar.set_description(f'Blockchain corrupt')
+
                     return False, max_num, cc, lc_list, timer
 
                 predecessor = current
-                bar.update()
+                if bar is not None:
+                    bar.update()
 
     chain_total = time.time() - start
     timer[('load', 'chain')] += chain_total - timer[('validate', 'chain')]
     timer[('count', 'chain')] = cc['h'] + 1
-    bar.close()
     return True, max_num, cc, lc_list, timer
 
 
@@ -389,69 +402,103 @@ def pair_find_adversary(ni: NodeInfo, nj: NodeInfo, return_evidence=False) -> Tu
     kl, _ = nl.find_file_range_by_term(term)
     kh1, kh2 = nh.find_file_range_by_term(term)
 
-    next_term, first_h = -1, None
+    next_term, kh, first_h, first_l = -1, -1, None, None
+
+    # Find first block of HiNode w/ term >= "term"
     for k in range(kh1, kh2+1):
         nh.open(k)
-
-        # LoNode has overlap in term with HiNode
-        if kl <= k <= nl.max_file:
-            nl.open(k)
-
-            while True:
-                bl = nl.read_block()
-                if bl is None:
-                    break
-
-                bh = nh.read_block()
-                assert bh and bh.h == bl.h
-                if bh.t > term:
-                    next_term = bh.t
-                    break
-                elif bh.t == term:
-                    if bh != bl:
-                        nh.close()
-                        nl.close()
-                        timer[('find', )] = time.time() - start
-                        return ([nh.leader_of(term)], timer) + (((bl, bh),) if return_evidence else ())
-                    elif first_h is None:
-                        first_h = bh
-                else:
-                    assert bl.t < term
-
-            nl.close()
-            if next_term != -1:
-                break
-
-        # Read blocks that LoNode misses
         while True:
             bh = nh.read_block()
             if bh is None:
+                nh.close()
                 break
 
             if bh.t > term:
                 next_term = bh.t
+                nh.close()
                 break
-            elif bh.t == term and first_h is None:
-                if return_evidence:
-                    nl.open(kl)
-                    while True:
-                        bl = nl.read_block()
-                        if bl is None:
-                            break
-                        if bl.t == term:
-                            nl.close()
-                            nh.close()
-                            timer[('find', )] = time.time() - start
-                            return ([nh.leader_of(term)], timer, (bl, bh))
-                    assert False
-                else:
+            elif bh.t == term:  # Do not close file if first.term == "term"
+                first_h, kh = bh, k
+                break
+
+        if next_term >= 0 or first_h is not None:
+            break
+
+    # Case 1: Hi has term
+    if first_h is not None:
+        # Case 1.1: first term block of Lo clearly doesn't match that of Hi
+        if kl != kh or first_h.h > nl.last_block.h:
+            nh.close()
+            if not return_evidence:
+                timer[('find', )] = time.time() - start
+                return ([nh.leader_of(term)], timer)
+
+            nl.open(kl)
+            while True:
+                bl = nl.read_block()
+                assert bl
+                if bl.t == term:
+                    nl.close()
+                    timer[('find', )] = time.time() - start
+                    return ([nh.leader_of(term)], timer, (bl, first_h))
+
+        # Case 1.2: first term block of Lo is in same file as Hi
+        nl.open(kh)
+        height_matched = False
+        while True:
+            bl = nl.read_block()
+            # After Lo/Hi start reading simultaneously
+            if height_matched:  # Impossible if Hi finished & Lo not finished
+                if bl is None:
+                    nl.close()
+                    if kh < nl.max_file:  # Lo not finished
+                        nh.close()
+                        kh += 1
+                        nl.open(kh)
+                        nh.open(kh)
+                        continue
+                    else:  # Lo Finished
+                        break
+
+                bh = nh.read_block()
+                assert bh is not None
+                assert bh.h == bl.h
+                assert bh.t >= term
+                if bh.t > bl.t:
+                    next_term = bh.t
+                    nl.close()
+                    nh.close()
+                    break
+                elif bh != bl:
+                    nl.close()
                     nh.close()
                     timer[('find', )] = time.time() - start
-                    return ([nh.leader_of(term)], timer)
+                    return ([nh.leader_of(term)], timer, (bl, bh))
+            # Lo starts catching up with Hi
+            elif bl.h == first_h.h:
+                if bl != first_h:
+                    nl.close()
+                    nh.close()
+                    timer[('find', )] = time.time() - start
+                    return ([nh.leader_of(term)], timer, (bl, first_h))
+                height_matched = True
+            # Else: Lo.term < "term", continue reading
 
-        nh.close()
-        if next_term != -1:
-            break
+        if next_term == -1:
+            while True:
+                bh = nh.read_block()
+                if bh is None:
+                    nh.close()
+                    kh += 1
+                    nh.open(kh)
+                    continue
+                if bh.t > term:
+                    nh.close()
+                    next_term = bh.t
+                    break
+    else:
+        # Case 2: Hi does not have term
+        pass
 
     assert next_term != -1
     adv = list(set(nh.lc_voter(next_term)).intersection(nl.cc_voter))
@@ -470,9 +517,10 @@ def audit_raft_logs(path: str, n: int):
     checked, adversarial = set([]), set([])
 
     nodeinfos: List[NodeInfo] = [None] * n
+    bar = tqdm()
     for i in range(n):
         dir_ = join(path, node.fmt_int(i, n-1))
-        good, nc, cc, lc, timer = check_node_integrity(dir_, node.fmt_int(i, n-1), n)
+        good, nc, cc, lc, timer = check_node_integrity(dir_, node.fmt_int(i, n-1), n, bar)
         for key in timer:
             meta_timer[key] += timer[key]
 
@@ -484,6 +532,7 @@ def audit_raft_logs(path: str, n: int):
         else:
             adversarial.add(i)
 
+    bar.close()
     if adversarial:
         print(f'{Fore.LIGHTRED_EX}Warning: nodes {adversarial} failed integrity checks{Fore.RESET}')
 
@@ -499,7 +548,7 @@ def audit_raft_logs(path: str, n: int):
             if conflict:
                 h, (bi, bj) = pair_find_forking_point(nodeinfos[i], nodeinfos[j], return_blocks=True)
                 adv, timer, evidence = pair_find_adversary(nodeinfos[i], nodeinfos[j], return_evidence=True)
-                print(i, j, bi, bj, *[e for e in evidence])
+                # print(i, j, bi, bj, *[e for e in evidence])
 
                 adversarial.update(adv)
                 for key in timer:

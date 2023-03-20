@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import argparse
 
@@ -21,6 +22,7 @@ if __name__ == '__main__':
     parser.add_argument('-e', '--election-freq', type=int, default=20, help='election interval')
     parser.add_argument('-w', '--wait', type=float, default=0., help='waiting time')
     parser.add_argument('--depth', type=float, default=0.5, help='attack depth')
+    parser.add_argument('-p', '--path', type=str, help='path to data', default='/data')
     parser.add_argument('-d', '--debug', action='store_true', help='debug')
     parser.add_argument('--fork', action='store_true')
     parser.add_argument('--bvote', action='store_true')
@@ -43,36 +45,32 @@ if __name__ == '__main__':
     np.random.seed(args.seed)
 
     n = 5
-    # BAD VOTE:
     if args.bvote:
         prefix = 'badvote'
         delay = ModuloSplitDelay(n, 100, 1000)
         # events, plans = TestEvents.TEST_BAD_VOTE_1(tx_count=100, tx_interval=50, tx_retry=20)
         events, plans = TestEvents.BAD_VOTE(tx_count=args.transactions,
                                             tx_interval=args.tx_interval, tx_retry=20, le_freq=args.election_freq, depth=args.depth)
-        datadir = f'{prefix}-{args.transactions}-{args.election_freq}-{args.blockchain_filesize}-{args.depth:4.2f}'
+        datadir = f'{prefix}-{args.transactions}-{args.election_freq}-{args.blockchain_filesize}-{args.depth:4.2f}-{args.seed}'
     elif args.fork:
         prefix = 'fork'
         delay = ModuloRandomDelay(n, 0, step=100, rand_mult=2.0)
         events, plans = TestEvents.LEADER_FORK(tx_count=args.transactions,
                                                tx_interval=args.tx_interval, tx_retry=20, le_freq=args.election_freq, depth=args.depth)
-        datadir = f'{prefix}-{args.transactions}-{args.election_freq}-{args.blockchain_filesize}-{args.depth:4.2f}'
+        datadir = f'{prefix}-{args.transactions}-{args.election_freq}-{args.blockchain_filesize}-{args.depth:4.2f}-{args.seed}'
     else:
         prefix = 'normal'
         delay = ModuloRandomDelay(n, 0, step=100, rand_mult=2.0)
         events, plans = TestEvents.NORMAL(tx_count=args.transactions,
                                           tx_interval=args.tx_interval, tx_retry=20, le_freq=args.election_freq)
-        datadir = f'{prefix}-{args.transactions}-{args.election_freq}-{args.blockchain_filesize}'
+        datadir = f'{prefix}-{args.transactions}-{args.election_freq}-{args.blockchain_filesize}-{args.seed}'
 
-    # FORK:
-    # delay = ModuloRandomDelay(n, 0, step=100, rand_mult=2.0)
-    # events, plans = TestEvents.TEST_FORK_1(tx_count=args.transactions, tx_interval=args.tx_interval, tx_retry=20)
-
-    # NORMAL:
     if args.maxtime < 0:
         args.maxtime = int(max(max([e.t for e in events]), args.transactions * args.tx_interval) * 1.1) + 10000
 
     # datadir = 'logs'
+    datadir = os.path.join(args.path, datadir)
+    print(datadir)
     net = Network(n, delay, tx_retry_time=10 * args.tx_interval, datadir=datadir,
                   adversary=4, debug=args.debug, uncommitted_file=args.write_uc)
     net.run(args.period, args.maxtime, events, plans, sleep=args.wait)
