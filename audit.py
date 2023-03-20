@@ -563,6 +563,23 @@ def audit_raft_logs(path: str, n: int):
     print(adversarial)
 
 
+def evidence_to_str(evidence, culprit: int):
+    assert isinstance(evidence, tuple) and len(evidence) == 2
+    e1, e2 = evidence
+    if isinstance(e1, node.Block):
+        assert isinstance(e2, node.Block)
+        return f'Node-{culprit} created non-family blocks in term {e1.t}:\n' + \
+            f'    B1: <height={e1.h}, predecessor_term={e1.pt}, payload="{e1.tx}">\n' + \
+            f'    B2: <height={e2.h}, predecessor_term={e2.pt}, payload="{e2.tx}">'
+    else:
+        assert isinstance(e1, dict) and isinstance(e2, dict)
+        if 'ft' in e1:
+            e1, e2 = e2, e1
+        return f'Node-{culprit} signed conflicting CC and LC:\n' + \
+            f'    CC: <term={e1["t"]}, height={e1["h"]}, signers={e1["voters"]}>\n' + \
+            f'    LC: <term={e2["t"]}, leader={e2["leader"]}, predecessor_term={e2["ft"]}, predecessor_height={e2["fh"]}, signers={e2["voters"]}>'
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-p', '--path', help='path to data', type=str, required=True)
