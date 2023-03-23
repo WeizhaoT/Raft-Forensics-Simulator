@@ -44,10 +44,10 @@ if __name__ == '__main__':
 
     np.random.seed(args.seed)
 
-    n = 5
+    n, a = 5, 4
     if args.bvote:
         prefix = 'badvote'
-        delay = ModuloSplitDelay(n, 100, 1000)
+        delay = ModuloSplitDelay(n, 100, 1000, a)
         # events, plans = TestEvents.TEST_BAD_VOTE_1(tx_count=100, tx_interval=50, tx_retry=20)
         events, plans = TestEvents.BAD_VOTE(tx_count=args.transactions,
                                             tx_interval=args.tx_interval, tx_retry=20, le_freq=args.election_freq, depth=args.depth)
@@ -72,5 +72,5 @@ if __name__ == '__main__':
     datadir = os.path.join(args.path, datadir)
     print(datadir)
     net = Network(n, delay, tx_retry_time=10 * args.tx_interval, datadir=datadir,
-                  adversary=4, debug=args.debug, uncommitted_file=args.write_uc)
+                  adversary=a, debug=args.debug, uncommitted_file=args.write_uc)
     net.run(args.period, args.maxtime, events, plans, sleep=args.wait)

@@ -6,6 +6,7 @@ import sys
 import json
 import hashlib
 import ecdsa
+import bisect
 import argparse
 import flatten_dict
 
@@ -13,7 +14,7 @@ from colorama import Fore
 from tqdm import tqdm
 from collections import defaultdict
 from os.path import join, isdir
-from typing import List, Tuple, Dict, Callable
+from typing import List, Tuple, Set, Callable
 from file_read_backwards import FileReadBackwards
 
 import node
@@ -88,6 +89,9 @@ class NodeInfo:
         self.fp = None
         self.chunk_last_blocks = {self.max_file: self.last_block}
         self.chunk_first_blocks = {0: node.Block(0, 0, -1)}
+
+        block = self.last_block_in_chunk(0)
+        self.chunk_size = block.h + 1
 
     def __getitem__(self, k):
         if not isinstance(k, int) or not 0 <= k <= self.max_file:
@@ -172,6 +176,30 @@ class NodeInfo:
             return node.Block.fromjson(node.readline_non_empty(self.fp))
         except EOFError:
             return None
+
+    def block_at(self, h: int):
+        if h > self.last_block.h:
+            raise ValueError(f'Attempting to search height {h}, greater than max height {self.last_block.h}')
+        if h == 0:
+            return self.first_block_in_chunk(0)
+        if h == self.last_block.h:
+            return self.last_block
+
+        k = h // self.chunk_size
+        if h % self.chunk_size == self.chunk_size - 1:
+            return self.last_block_in_chunk(k)
+
+        self.open(k)
+        while True:
+            block = self.read_block()
+            if block is None:
+                break
+
+            if block.h == h:
+                self.close()
+                return block
+
+        raise ValueError(f'Cannot find block at height {h} in file {k} of node {self.id}')
 
 
 def is_valid_int(k, n=0):
@@ -301,6 +329,7 @@ def check_node_integrity(dir_, name, n, bar: tqdm = None) -> Tuple[bool, int, di
         bar.refresh()
 
     start = time.time()
+    all_terms = set()
     for i in range(max_num + 1):
         with open(join(dir_, f'blockchain_{name}_{node.fmt_int(i, max_num)}.jsonl'), 'r') as f:
             while True:
@@ -316,9 +345,14 @@ def check_node_integrity(dir_, name, n, bar: tqdm = None) -> Tuple[bool, int, di
                 if predecessor is None:
                     predicate = current != node.Block(0, 0, -1)
                 else:
+                    assert isinstance(predecessor, node.Block)
                     predicate = not current.follows(predecessor, check_hash=True) or \
                         current.t not in lc_list or \
                         not check_sig()
+                    if current.t != predecessor.t:
+                        predicate = predicate or lc_list[current.t]['ft'] != predecessor.t or \
+                            lc_list[current.t]['fh'] != predecessor.h
+
                 timer[('validate', 'chain')] += time.time() - start2
 
                 if predicate:
@@ -330,9 +364,15 @@ def check_node_integrity(dir_, name, n, bar: tqdm = None) -> Tuple[bool, int, di
                     return False, max_num, cc, lc_list, timer
 
                 predecessor = current
+                all_terms.add(current.t)
                 if bar is not None:
                     bar.update()
 
+    for t in list(lc_list.keys()):
+        if t not in all_terms:
+            lc_list.pop(t)
+
+    lc_list = dict(sorted(lc_list.items()))
     chain_total = time.time() - start
     timer[('load', 'chain')] += chain_total - timer[('validate', 'chain')]
     timer[('count', 'chain')] = cc['h'] + 1
@@ -386,6 +426,17 @@ def pair_find_forking_point(ni: NodeInfo, nj: NodeInfo, return_blocks=False) -> 
 def pair_find_adversary(ni: NodeInfo, nj: NodeInfo, return_evidence=False) -> Tuple:
     timer = {}
     start = time.time()
+
+    nl, nh = (ni, nj) if len(ni.lc) <= len(nj.lc) else (nj, ni)
+    for t, c in nl.lc.items():
+        if t in nh.lc and c['leader'] != nh.leader_of(t):
+            timer[('find', )] = time.time() - start
+            if return_evidence:
+                return (list(set(nl.lc_voter(t)).intersection(nh.lc_voter(t))), timer)
+            else:
+                return (list(set(nl.lc_voter(t)).intersection(nh.lc_voter(t))), timer,
+                        ({"term": t} | nl.lc[t], {"term": t} | nh.lc[t]))
+
     if ni.final_term == nj.final_term:
         if not return_evidence:
             timer[('find', )] = time.time() - start
@@ -507,6 +558,62 @@ def pair_find_adversary(ni: NodeInfo, nj: NodeInfo, return_evidence=False) -> Tu
     return (adv, timer) + (((nl.cc, {'t': next_term} | nh.lc[next_term]),) if return_evidence else ())
 
 
+def pair_find_adversary_alt(ni: NodeInfo, nj: NodeInfo, return_evidence=False) -> Tuple:
+    timer = {}
+    start = time.time()
+
+    nl, nh = (ni, nj) if len(ni.lc) <= len(nj.lc) else (nj, ni)
+    for t, c in nl.lc.items():
+        if t in nh.lc and c['leader'] != nh.leader_of(t):
+            timer[('find', )] = time.time() - start
+            if return_evidence:
+                return (list(set(nl.lc_voter(t)).intersection(nh.lc_voter(t))), timer)
+            else:
+                return (list(set(nl.lc_voter(t)).intersection(nh.lc_voter(t))), timer,
+                        ({"term": t} | nl.lc[t], {"term": t} | nh.lc[t]))
+
+    # Case 1
+    if ni.final_term == nj.final_term:
+        if not return_evidence:
+            timer[('find', )] = time.time() - start
+            return ([ni.leader_of(ni.final_term)], timer)
+        else:
+            nl, nh = (ni, nj) if ni.length < nj.length else (nj, ni)
+            bh = find_matching_height(nh[nl.max_file], nl.last_block)
+            timer[('find', )] = time.time() - start
+            return ([ni.leader_of(ni.final_term)], timer, (nl.last_block, bh))
+
+    nl, nh = (ni, nj) if ni.final_term < nj.final_term else (nj, ni)
+    term = nl.final_term
+
+    terms_h = list(nh.lc.keys())
+    next_term = terms_h[bisect.bisect_right(terms_h, term)]
+    LC = nh.lc[next_term]
+    if term in nh.lc:
+        assert term == LC['ft']
+        h = min(LC['fh'], nl.last_block.h)
+        bl, bh = nl.block_at(h), nh.block_at(h)
+        if bl != bh:  # Case 2
+            if not return_evidence:
+                timer[('find', )] = time.time() - start
+                return ([nh.leader_of(term)], timer)
+            else:
+                hl, hh = nl.lc[term]['fh'] + 1, nh.lc[term]['fh'] + 1
+                bl, bh = nl.block_at(hl), nh.block_at(hh)
+                timer[('find', )] = time.time() - start
+                return ([nh.leader_of(term)], timer, (bl, bh))
+
+    # Cases 3 and 4
+    assert next_term != -1
+    adv = list(set(nh.lc_voter(next_term)).intersection(nl.cc_voter))
+    assert len(adv) > 0
+    timer[('find', )] = time.time() - start
+    if return_evidence:
+        return (adv, timer, (nl.cc, {'t': next_term} | LC))
+    else:
+        return (adv, timer)
+
+
 def audit_raft_logs(path: str, n: int):
     def chain_file_func(i):
         return lambda c: join(path, f'{node.fmt_int(i, n-1)}', f'blockchain_{node.fmt_int(i, n-1)}_{node.fmt_int(c, maxc[i])}.jsonl')
@@ -536,23 +643,28 @@ def audit_raft_logs(path: str, n: int):
     if adversarial:
         print(f'{Fore.LIGHTRED_EX}Warning: nodes {adversarial} failed integrity checks{Fore.RESET}')
 
-    for i in checked:
-        for j in checked:
-            if i >= j:
+    target_set: Set[int] = checked
+    while len(target_set) > 1:
+        longest: NodeInfo = max(target_set, key=lambda v: nodeinfos[v].length)
+        next_target_set = set()
+        for v in target_set:
+            if v == longest:
                 continue
-            conflict, timer = pair_consistency_check(nodeinfos[i], nodeinfos[j])
-
+            conflict, timer = pair_consistency_check(nodeinfos[longest], nodeinfos[v])
             for key in timer:
                 meta_timer[key] += timer[key]
-
             if conflict:
-                h, (bi, bj) = pair_find_forking_point(nodeinfos[i], nodeinfos[j], return_blocks=True)
-                adv, timer, evidence = pair_find_adversary(nodeinfos[i], nodeinfos[j], return_evidence=True)
+                next_target_set.add(v)
+                # h, (bi, bj) = pair_find_forking_point(nodeinfos[i], nodeinfos[j], return_blocks=True)
+                # adv, timer, evidence = pair_find_adversary(nodeinfos[i], nodeinfos[j], return_evidence=True)
+                adv, timer, = pair_find_adversary_alt(nodeinfos[longest], nodeinfos[v], return_evidence=False)
                 # print(i, j, bi, bj, *[e for e in evidence])
 
                 adversarial.update(adv)
                 for key in timer:
                     meta_timer[key] += timer[key]
+
+        target_set = next_target_set
 
     meta_timer.update(FUNC_TIMER)
     meta_timer = flatten_dict.unflatten(dict(meta_timer))

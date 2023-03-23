@@ -2,9 +2,10 @@ import numpy as np
 
 
 class BaseDelay:
-    def __init__(self, n) -> None:
+    def __init__(self, n, adv=-1) -> None:
         self.n = n
         self.base = 0
+        self.adv = adv
 
     def __call__(self, n1, n2) -> int:
         if not isinstance(n1, int) or not 0 <= n1 < self.n:
@@ -59,16 +60,41 @@ class ModuloDelay(BaseDelay):
 
 # Special delay for testing "bad vote"
 class ModuloSplitDelay(BaseDelay):
-    def __init__(self, n, start, step) -> None:
-        super().__init__(n)
+    def __init__(self, n, start, step, adv) -> None:
+        super().__init__(n, adv)
         self.start = start
         self.step = step
+        self.dist_rank = {i: i for i in range(n)}
+        self.rebase(0)
 
     def __call__(self, n1, n2) -> int:
         super().__call__(n1, n2)
-        n1, n2 = (n1-self.base) % self.n, (n2-self.base) % self.n
-        return self.start * abs(n2 - n1) if abs(n2 - n1) * 2 < self.n else \
-            self.start * (abs(n2 - n1) - self.n // 2) + self.step
+        if self.base == n1 or self.base == n2:
+            other = n1 if n2 == self.base else n2
+            return self.start * self.dist_rank[other] if self.dist_rank[other] * 2 < self.n else \
+                self.start * (self.dist_rank[other] - self.n // 2) + self.step
+        else:
+            d = abs(self.dist_rank[n1] - self.dist_rank[n2])
+            return self.start * d if d * 2 < self.n else self.start * (d - self.n // 2) + self.step
+
+        # n1, n2 = (n1-self.base) % self.n, (n2-self.base) % self.n
+        # return self.start * abs(n2 - n1) if abs(n2 - n1) * 2 < self.n else \
+        #     self.start * (abs(n2 - n1) - self.n // 2) + self.step
+
+    def rebase(self, b) -> None:
+        super().rebase(b)
+        self.dist_rank[b] = 0
+        rank = 1
+        if self.adv != self.base:
+            self.dist_rank[self.adv] = 1
+            rank = 2
+
+        for i in range(self.n-1):
+            j = (self.base + 1 + i) % self.n
+            if j == self.adv:
+                continue
+            self.dist_rank[j] = rank
+            rank += 1
 
 
 class ModuloRandomDelay(BaseDelay):
